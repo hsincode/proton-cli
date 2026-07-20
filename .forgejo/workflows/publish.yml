@@ -51,7 +51,7 @@ jobs:
             echo "::error::Repository secret CARGO_REGISTRY_TOKEN is not set"
             exit 1
           fi
-          # Package name on crates.io is `protoncli` (binary remains proton-cli).
+          # Package name on crates.io is `protoncli` (binary: protoncli).
           # Idempotent: if this exact version is already published (manual publish,
           # partial re-run), treat as success so forgejo-release still runs.
           set +e
@@ -89,8 +89,8 @@ jobs:
 
           if [ -z "${RELEASE_ID}" ] || [ "${RELEASE_ID}" = "null" ]; then
             echo "==> Creating release ${TAG}"
-            # crates.io package is protoncli; installed binary is proton-cli
-            BODY=$(printf '%s' "{\"tag_name\":\"${TAG}\",\"name\":\"proton-cli ${TAG}\",\"body\":\"Published to crates.io as **protoncli**. Install: \`cargo install protoncli\` (binary: proton-cli)\",\"generate_release_notes\":true}")
+            # crates.io package is protoncli; installed binary is protoncli
+            BODY=$(printf '%s' "{\"tag_name\":\"${TAG}\",\"name\":\"protoncli ${TAG}\",\"body\":\"Published to crates.io as **protoncli**. Install: \`cargo install protoncli\` (binary: protoncli)\",\"generate_release_notes\":true}")
             CREATE_JSON=$(curl -s -H "${AUTH}" -H "Content-Type: application/json" -X POST \
               "${API_BASE}/releases" -d "${BODY}")
             RELEASE_ID=$(printf '%s' "${CREATE_JSON}" | jsonext id)

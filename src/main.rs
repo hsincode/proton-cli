@@ -1,4 +1,4 @@
-//! proton-cli — CLI launcher for Windows games via umu + Proton.
+//! protoncli — CLI launcher for Windows games via umu + Proton.
 
 mod apps;
 mod browse;
@@ -295,7 +295,7 @@ fn try_main() -> Result<ExitCode, Error> {
                 let installs = proton::list_installs(&paths)?;
                 if installs.is_empty() {
                     println!("(no Proton installs found)");
-                    println!("hint: proton-cli proton install");
+                    println!("hint: protoncli proton install");
                 } else {
                     for p in installs {
                         println!("[{}] {}  {}", p.source, p.name, p.path.display());
@@ -341,7 +341,7 @@ fn try_main() -> Result<ExitCode, Error> {
             doctor::print_report(&report);
             match config.locale.as_deref().and_then(locale::find) {
                 Some(l) => println!("locale     : {} ({})", l.id, l.posix),
-                None => println!("locale     : (not set — run `proton-cli` TUI to choose)"),
+                None => println!("locale     : (not set — run `protoncli` TUI to choose)"),
             }
             println!(
                 "graphics   : {} (config.launch.graphics)",

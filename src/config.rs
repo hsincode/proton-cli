@@ -60,7 +60,7 @@ pub struct LaunchConfig {
     ///
     /// - `"quiet"` — hide child stdout/stderr (daily play; use `normal` to debug)
     /// - `"normal"` — inherit streams (default; current pre-setting behaviour)
-    /// - `"verbose"` — inherit + extra proton-cli launch diagnostics
+    /// - `"verbose"` — inherit + extra protoncli launch diagnostics
     pub log_level: String,
 }
 

@@ -8,7 +8,7 @@ use crate::config::DesktopConfig;
 use crate::error::Result;
 use crate::paths::Paths;
 
-/// Write `~/.local/share/applications/proton-cli-<id>.desktop`.
+/// Write `~/.local/share/applications/protoncli-<id>.desktop`.
 pub fn install_shortcut(
     paths: &Paths,
     desktop_cfg: &DesktopConfig,
@@ -66,9 +66,9 @@ fn render_desktop(desktop_cfg: &DesktopConfig, app_id: &str, entry: &AppEntry) -
 Type=Application
 Version=1.0
 Name={name}
-Comment=Launched via proton-cli
-Exec=proton-cli launch {app_id}
-TryExec=proton-cli
+Comment=Launched via protoncli
+Exec=protoncli launch {app_id}
+TryExec=protoncli
 Icon={icon}
 Terminal=false
 Categories={categories}
@@ -116,7 +116,7 @@ mod tests {
     fn desktop_contains_launch() {
         let cfg = DesktopConfig::default();
         let text = render_desktop(&cfg, "cool-game", &sample_entry());
-        assert!(text.contains("Exec=proton-cli launch cool-game"));
+        assert!(text.contains("Exec=protoncli launch cool-game"));
         assert!(text.contains("Name=Cool Game"));
         assert!(text.contains("Type=Application"));
         assert!(text.contains("Categories=Game;"));

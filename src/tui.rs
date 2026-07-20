@@ -1,4 +1,4 @@
-//! Minimal setup TUI (launched when proton-cli is run with no subcommand).
+//! Minimal setup TUI (launched when protoncli is run with no subcommand).
 //!
 //! Covers the settings a player typically needs before launching games:
 //! app list / launch, register app, wine prefixes, Proton runtime, launch settings
@@ -112,6 +112,19 @@ fn s_field_idle() -> Style {
 fn s_quit() -> Style {
     Style::default().fg(Color::Red)
 }
+/// Currently configured Proton (not just cursor highlight).
+fn s_active_item() -> Style {
+    Style::default()
+        .fg(Color::Green)
+        .add_modifier(Modifier::BOLD)
+}
+/// Cursor is on the currently configured Proton.
+fn s_active_sel() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Green)
+        .add_modifier(Modifier::BOLD)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -162,7 +175,8 @@ struct App {
     add_field: AddField,
     app_ids: Vec<String>,
     prefix_ids: Vec<String>,
-    proton_names: Vec<String>,
+    /// Discovered Proton installs (name / path / source) for the Proton screen.
+    proton_installs: Vec<proton::ProtonInstall>,
     proton_sel: usize,
     /// Index for global locale picker (`selectable`).
     locale_sel: usize,
@@ -281,7 +295,7 @@ impl App {
             add_field: AddField::Name,
             app_ids: Vec::new(),
             prefix_ids: Vec::new(),
-            proton_names: Vec::new(),
+            proton_installs: Vec::new(),
             proton_sel: 0,
             locale_sel,
             app_locale_sel: 0,
@@ -350,7 +364,7 @@ impl App {
         self.config.save(&self.paths)?;
         let hint = match next {
             "quiet" => "hide umu/Proton/Wine terminal output",
-            "verbose" => "inherit streams + extra proton-cli diagnostics",
+            "verbose" => "inherit streams + extra protoncli diagnostics",
             _ => "show umu/Proton/Wine output (default)",
         };
         self.status = format!("log_level = {next} ({hint})");
@@ -564,14 +578,58 @@ impl App {
             self.prefix_state.select(Some(0));
         }
 
-        let installs = proton::list_installs(&self.paths).unwrap_or_default();
-        self.proton_names = installs
-            .iter()
-            .map(|p| format!("[{}] {}  {}", p.source, p.name, p.path.display()))
-            .collect();
-        if self.proton_sel >= self.proton_names.len() {
+        self.proton_installs = proton::list_installs(&self.paths).unwrap_or_default();
+        // Keep cursor in range; prefer the currently resolved default when possible.
+        if self.proton_installs.is_empty() {
             self.proton_sel = 0;
+        } else if self.proton_sel >= self.proton_installs.len() {
+            self.proton_sel = self
+                .active_proton_index()
+                .unwrap_or(0)
+                .min(self.proton_installs.len() - 1);
         }
+        Ok(())
+    }
+
+    /// Index of the install that matches the configured / resolved default Proton.
+    fn active_proton_index(&self) -> Option<usize> {
+        let resolved =
+            proton::resolve_proton_path(&self.paths, &self.config.proton, &self.config.proton.default)
+                .ok();
+        if let Some(path) = resolved.as_ref() {
+            if let Some(i) = self.proton_installs.iter().position(|p| &p.path == path) {
+                return Some(i);
+            }
+        }
+        // Fallback: exact name match against config.proton.default
+        let def = self.config.proton.default.as_str();
+        self.proton_installs.iter().position(|p| p.name == def)
+    }
+
+    /// True when this install is the one currently used as the global default.
+    fn is_active_proton(&self, install: &proton::ProtonInstall) -> bool {
+        self.active_proton_index()
+            .and_then(|i| self.proton_installs.get(i))
+            .is_some_and(|p| p.path == install.path)
+    }
+
+    /// Set global default Proton to the install under the cursor (and align prefer).
+    fn set_default_proton_from_sel(&mut self) -> Result<()> {
+        let Some(inst) = self.proton_installs.get(self.proton_sel).cloned() else {
+            self.status = "no Proton selected — install with [i] or refresh [r]".into();
+            return Ok(());
+        };
+        // Name match is how resolve_proton_path picks installs; prefer matches source
+        // so "dwproton" / same-named tools resolve to the intended tree first.
+        self.config.proton.default = inst.name.clone();
+        self.config.proton.prefer = inst.source.to_string();
+        // List selection is the source of truth — drop any absolute override.
+        self.config.proton.explicit_path = None;
+        self.config.save(&self.paths)?;
+        self.status = format!(
+            "default Proton = {} [{}]  prefer={}",
+            inst.name, inst.source, inst.source
+        );
         Ok(())
     }
 
@@ -653,8 +711,18 @@ impl App {
         if report.protons.is_empty() {
             lines.push("Proton    : none".into());
         } else {
+            lines.push("Proton    : (★ = default)".into());
             for p in &report.protons {
-                lines.push(format!("  [{}] {}", p.source, p.name));
+                let mark = report
+                    .default_proton
+                    .as_ref()
+                    .is_some_and(|d| d == &p.path);
+                lines.push(format!(
+                    "  {}[{}] {}",
+                    if mark { "★ " } else { "  " },
+                    p.source,
+                    p.name
+                ));
             }
         }
         self.doctor_lines = lines;
@@ -757,7 +825,13 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
                 3 => {
                     app.refresh_lists()?;
                     app.screen = Screen::Proton;
-                    app.status = "i install · m/t prefer · Esc back".into();
+                    app.refresh_lists()?;
+                    if let Some(i) = app.active_proton_index() {
+                        app.proton_sel = i;
+                    }
+                    app.status =
+                        "↑↓ move  Enter set default  [i] install  [m]/[t] prefer  [d] dwproton  [r]"
+                            .into();
                 }
                 4 => {
                     app.launch_set_sel = 0;
@@ -921,18 +995,22 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
                 app.status = "↑↓ move  Enter select  Esc back  q quit".into();
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                if !app.proton_names.is_empty() {
+                if !app.proton_installs.is_empty() {
                     app.proton_sel = if app.proton_sel == 0 {
-                        app.proton_names.len() - 1
+                        app.proton_installs.len() - 1
                     } else {
                         app.proton_sel - 1
                     };
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
-                if !app.proton_names.is_empty() {
-                    app.proton_sel = (app.proton_sel + 1) % app.proton_names.len();
+                if !app.proton_installs.is_empty() {
+                    app.proton_sel = (app.proton_sel + 1) % app.proton_installs.len();
                 }
+            }
+            // Primary action: pick the highlighted install as the global default.
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                app.set_default_proton_from_sel()?;
             }
             KeyCode::Char('i') => {
                 let paths = app.paths.clone();
@@ -946,6 +1024,10 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
                 match install_res {
                     Ok(()) => {
                         app.refresh_lists()?;
+                        // Jump cursor to the newly preferred managed dwproton if present.
+                        if let Some(i) = app.active_proton_index() {
+                            app.proton_sel = i;
+                        }
                         app.status = "dwproton install finished".into();
                     }
                     Err(e) => {
@@ -956,20 +1038,28 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
             KeyCode::Char('m') => {
                 app.config.proton.prefer = "managed".into();
                 app.config.save(&app.paths)?;
-                app.status = "prefer = managed".into();
+                app.status = "prefer = managed (used when default is logical dwproton)".into();
             }
             KeyCode::Char('t') => {
                 app.config.proton.prefer = "steam".into();
                 app.config.save(&app.paths)?;
-                app.status = "prefer = steam".into();
+                app.status = "prefer = steam (used when default is logical dwproton)".into();
             }
             KeyCode::Char('d') => {
+                // Logical alias: newest dwproton-* with prefer ranking.
                 app.config.proton.default = "dwproton".into();
+                app.config.proton.explicit_path = None;
                 app.config.save(&app.paths)?;
-                app.status = "default proton = dwproton".into();
+                if let Some(i) = app.active_proton_index() {
+                    app.proton_sel = i;
+                }
+                app.status = "default proton = dwproton (latest matching prefer)".into();
             }
             KeyCode::Char('r') => {
                 app.refresh_lists()?;
+                if let Some(i) = app.active_proton_index() {
+                    app.proton_sel = i;
+                }
                 app.status = "proton list refreshed".into();
             }
             _ => {}
@@ -1382,7 +1472,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     };
 
     let title = Paragraph::new(Line::from(vec![
-        Span::styled(" proton-cli ", s_title()),
+        Span::styled(" protoncli ", s_title()),
         Span::styled(format!(" root={} ", app.paths.root.display()), s_dim()),
         Span::styled(screen_label, s_screen()),
         Span::raw("  "),
@@ -1534,43 +1624,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             f.render_stateful_widget(list, chunks[1], &mut app.prefix_state);
         }
         Screen::Proton => {
-            let mut lines: Vec<Line> = vec![
-                Line::from(vec![
-                    Span::styled("config: ", s_dim()),
-                    Span::styled(
-                        format!(
-                            "default={}  prefer={}",
-                            app.config.proton.default, app.config.proton.prefer
-                        ),
-                        s_accent(),
-                    ),
-                ]),
-                Line::from(Span::styled(
-                    "keys: [i] install dwproton  [m] managed  [t] steam  [d] default=dwproton  [r]",
-                    s_hint(),
-                )),
-                Line::from(""),
-                Line::from(Span::styled("Installed:", s_title())),
-            ];
-            if app.proton_names.is_empty() {
-                lines.push(Line::from(Span::styled(
-                    "  (none — press i to install)",
-                    s_warn(),
-                )));
-            } else {
-                for (i, name) in app.proton_names.iter().enumerate() {
-                    let sel = app.proton_sel == i;
-                    let style = if sel { s_sel_row() } else { Style::default() };
-                    lines.push(Line::from(Span::styled(
-                        format!("{} {name}", if sel { ">" } else { " " }),
-                        style,
-                    )));
-                }
-            }
-            let p = Paragraph::new(lines)
-                .block(block_main("Proton"))
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, chunks[1]);
+            ui_proton_settings(f, app, chunks[1]);
         }
         Screen::Doctor => {
             let lines: Vec<Line> = app
@@ -1611,6 +1665,9 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         || app.status.contains("graphics =")
         || app.status.contains("sanitize_vulkan =")
         || app.status.contains("log_level =")
+        || app.status.contains("default Proton")
+        || app.status.contains("default proton")
+        || app.status.contains("prefer =")
         || app.status.contains("registered")
         || app.status.contains("created")
         || app.status.contains("finished")
@@ -1628,6 +1685,119 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     f.render_widget(status, chunks[2]);
 }
 
+/// Proton settings: highlight the active default and let Enter pick another install.
+fn ui_proton_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let prefer = app.config.proton.prefer.as_str();
+    let resolved =
+        proton::resolve_proton_path(&app.paths, &app.config.proton, &app.config.proton.default).ok();
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // --- active summary (what will actually be used) ---
+    lines.push(Line::from(vec![
+        Span::styled("Using: ", s_dim()),
+        Span::styled(app.config.proton.default.clone(), s_active_item()),
+        Span::styled("   prefer=", s_dim()),
+        Span::styled(
+            prefer.to_string(),
+            if prefer == "managed" || prefer == "steam" {
+                s_active_item()
+            } else {
+                s_warn()
+            },
+        ),
+    ]));
+    match &resolved {
+        Some(p) => lines.push(Line::from(vec![
+            Span::styled("PROTONPATH: ", s_dim()),
+            Span::styled(p.display().to_string(), s_ok()),
+        ])),
+        None => lines.push(Line::from(vec![
+            Span::styled("PROTONPATH: ", s_dim()),
+            Span::styled(
+                "unresolved — install with [i] or pick a listed Proton",
+                s_warn(),
+            ),
+        ])),
+    }
+
+    // prefer keys: color the active choice
+    let managed_style = if prefer == "managed" {
+        s_active_item()
+    } else {
+        s_hint()
+    };
+    let steam_style = if prefer == "steam" {
+        s_active_item()
+    } else {
+        s_hint()
+    };
+    lines.push(Line::from(vec![
+        Span::styled("keys: ", s_hint()),
+        Span::styled("Enter", s_title()),
+        Span::styled(" set default  ", s_hint()),
+        Span::styled("[i]", s_hint()),
+        Span::styled(" install  ", s_hint()),
+        Span::styled("[m]", managed_style),
+        Span::styled(" managed  ", managed_style),
+        Span::styled("[t]", steam_style),
+        Span::styled(" steam  ", steam_style),
+        Span::styled("[d]", s_hint()),
+        Span::styled(" dwproton  ", s_hint()),
+        Span::styled("[r]", s_hint()),
+        Span::styled(" refresh", s_hint()),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "★ = currently used   green = active   cyan cursor = selection",
+        s_dim(),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Installed Proton:", s_title())));
+
+    if app.proton_installs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (none — press [i] to install dwproton, or install Proton via Steam)",
+            s_warn(),
+        )));
+    } else {
+        for (i, inst) in app.proton_installs.iter().enumerate() {
+            let cursor = app.proton_sel == i;
+            let active = app.is_active_proton(inst);
+            let mark = match (active, cursor) {
+                (true, _) => "★",
+                (false, true) => ">",
+                (false, false) => " ",
+            };
+            let style = match (active, cursor) {
+                (true, true) => s_active_sel(),
+                (true, false) => s_active_item(),
+                (false, true) => s_sel_row(),
+                (false, false) => Style::default().fg(Color::White),
+            };
+            // Show short path parent so managed vs steam is obvious beyond the source tag.
+            let path_hint = inst
+                .path
+                .parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default();
+            let label = format!(
+                "{mark} [{src}] {name}  {hint}",
+                src = inst.source,
+                name = inst.name,
+                hint = path_hint,
+            );
+            lines.push(Line::from(Span::styled(label, style)));
+        }
+    }
+
+    let p = Paragraph::new(lines)
+        .block(block_main(
+            "Proton  —  ↑↓  Enter set default  Esc back",
+        ))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
 fn ui_locale_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let first_run = app.screen == Screen::LocaleSetup;
     let per_app = app.screen == Screen::AppLocale;
@@ -1636,7 +1806,7 @@ fn ui_locale_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     if first_run {
         lines.push(Line::from(Span::styled(
-            "Welcome to proton-cli — choose the default launch locale.",
+            "Welcome to protoncli — choose the default launch locale.",
             s_title(),
         )));
     } else if per_app {
@@ -1749,7 +1919,7 @@ fn ui_launch_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let log_level = config::normalize_log_level(&app.config.launch.log_level);
     let log_hint = match log_level {
         "quiet" => "Hide umu/Proton/Wine stdout+stderr (use normal when debugging)",
-        "verbose" => "Inherit streams + extra proton-cli launch diagnostics",
+        "verbose" => "Inherit streams + extra protoncli launch diagnostics",
         _ => "Show umu/Proton/Wine output on the terminal (default)",
     };
 

@@ -7,7 +7,7 @@ Wine / Proton 本体は同梱しない。ユーザー向け説明は [README.md]
 |------|-----|
 | リポジトリ | https://codeberg.org/xuanling/proton-cli |
 | crates.io パッケージ名 | `protoncli`（`proton-cli` は占有済み） |
-| バイナリ / コマンド名 | `proton-cli` |
+| バイナリ / コマンド名 | `protoncli` |
 | MSRV | 1.80 |
 | 既定 Proton | dwproton（Dawn Winery） |
 | ランタイムデータ | `~/.protoncli/`（config / apps / prefixes / runtimes） |
@@ -28,7 +28,7 @@ make run ARGS='doctor'
 ```bash
 cargo test --locked
 cargo build --release --locked
-cargo run --locked --bin proton-cli -- <subcommand>
+cargo run --locked --bin protoncli -- <subcommand>
 ```
 
 CI（`.forgejo/workflows/ci.yml`）は `cargo test --locked` と `cargo build --release --locked`。
@@ -51,7 +51,7 @@ CI（`.forgejo/workflows/ci.yml`）は `cargo test --locked` と `cargo build --
 ## 守ること
 
 - **薄いオーケストレータを維持する**。互換性本体（DXVK / protonfixes 等）をここに再実装しない。起動は `umu-run` または Steam Linux Runtime + Proton に委譲。
-- **パッケージ名とバイナリ名を混同しない**: crates.io = `protoncli`、コマンド = `proton-cli`。
+- **パッケージ名とバイナリ名**: crates.io もコマンドも **`protoncli`**（リポジトリ名は `proton-cli`）。
 - **パスの正**: 既定 wineprefix は `~/.protoncli/default`（id `default`）。名前付きは `~/.protoncli/prefixes/<id>`。
 - **ユーザーの `~/.protoncli/` をリポジトリに持ち込まない**（gitignore 対象外でもコミットしない）。
 - 変更後は少なくとも `cargo test --locked` を通す。

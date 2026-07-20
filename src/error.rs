@@ -1,4 +1,4 @@
-//! Shared error types for proton-cli.
+//! Shared error types for protoncli.
 
 use std::path::PathBuf;
 
@@ -28,16 +28,16 @@ pub enum Error {
     ExeNotFound(PathBuf),
 
     #[error(
-        "umu-run not found (optional when Steam is installed; see `proton-cli doctor`)"
+        "umu-run not found (optional when Steam is installed; see `protoncli doctor`)"
     )]
     UmuNotFound,
 
     #[error(
-        "no launch backend: install Steam (with SteamLinuxRuntime + Proton) or umu-launcher; see `proton-cli doctor`"
+        "no launch backend: install Steam (with SteamLinuxRuntime + Proton) or umu-launcher; see `protoncli doctor`"
     )]
     NoLaunchBackend,
 
-    #[error("no Proton runtime found; install Steam Proton / dwproton or run `proton-cli proton install`")]
+    #[error("no Proton runtime found; install Steam Proton / dwproton or run `protoncli proton install`")]
     ProtonNotFound,
 
     #[error("Proton path does not look like a valid Proton install: {0}")]

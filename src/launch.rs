@@ -67,7 +67,7 @@ fn umu_search_paths() -> Vec<PathBuf> {
     if let Some(base) = directories::BaseDirs::new() {
         let home = base.home_dir();
         out.extend([
-            // proton-cli managed
+            // protoncli managed
             home.join(".protoncli/bin/umu-run"),
             home.join(".local/bin/umu-run"),
             // Lutris ships a zipapp here when Proton-GE is used
@@ -330,7 +330,7 @@ fn run_via_umu(umu_run: &Path, spec: &LaunchSpec) -> Result<ExitStatus> {
     log_banner(
         &spec.log_level,
         &format!(
-            "proton-cli: backend=umu ({}) STEAM_COMPAT_DATA_PATH={} PROTONPATH={} graphics={} sanitize_vulkan={} log_level={}",
+            "protoncli: backend=umu ({}) STEAM_COMPAT_DATA_PATH={} PROTONPATH={} graphics={} sanitize_vulkan={} log_level={}",
             umu_run.display(),
             spec.prefix.display(),
             spec.proton_path.display(),
@@ -341,14 +341,14 @@ fn run_via_umu(umu_run: &Path, spec: &LaunchSpec) -> Result<ExitStatus> {
     );
     if config::normalize_log_level(&spec.log_level) == "verbose" {
         eprintln!(
-            "proton-cli: verbose: GAMEID={} STORE={} exe={} args={:?}",
+            "protoncli: verbose: GAMEID={} STORE={} exe={} args={:?}",
             spec.game_id,
             spec.store,
             spec.exe.display(),
             spec.args
         );
         if !spec.env.is_empty() {
-            eprintln!("proton-cli: verbose: launch env = {:?}", spec.env);
+            eprintln!("protoncli: verbose: launch env = {:?}", spec.env);
         }
     }
 
@@ -401,7 +401,7 @@ fn run_via_steam(
         log_banner(
             &spec.log_level,
             &format!(
-                "proton-cli: backend=steam+{} client={} STEAM_COMPAT_DATA_PATH={} PROTON={} graphics={} sanitize_vulkan={} log_level={}",
+                "protoncli: backend=steam+{} client={} STEAM_COMPAT_DATA_PATH={} PROTON={} graphics={} sanitize_vulkan={} log_level={}",
                 layout.runtime_name,
                 layout.client_install.display(),
                 spec.prefix.display(),
@@ -413,7 +413,7 @@ fn run_via_steam(
         );
         if config::normalize_log_level(&spec.log_level) == "verbose" {
             eprintln!(
-                "proton-cli: verbose: GAMEID={} STORE={} SteamAppId={} exe={} args={:?}",
+                "protoncli: verbose: GAMEID={} STORE={} SteamAppId={} exe={} args={:?}",
                 spec.game_id,
                 spec.store,
                 steam_app_id,
@@ -421,7 +421,7 @@ fn run_via_steam(
                 spec.args
             );
             if !spec.env.is_empty() {
-                eprintln!("proton-cli: verbose: launch env = {:?}", spec.env);
+                eprintln!("protoncli: verbose: launch env = {:?}", spec.env);
             }
         }
 
@@ -447,7 +447,7 @@ fn run_via_steam(
     log_banner(
         &spec.log_level,
         &format!(
-            "proton-cli: backend=steam-bare (no SLR container) client={} STEAM_COMPAT_DATA_PATH={} PROTON={} graphics={} sanitize_vulkan={} log_level={}",
+            "protoncli: backend=steam-bare (no SLR container) client={} STEAM_COMPAT_DATA_PATH={} PROTON={} graphics={} sanitize_vulkan={} log_level={}",
             layout.client_install.display(),
             spec.prefix.display(),
             spec.proton_path.display(),
@@ -457,7 +457,7 @@ fn run_via_steam(
         ),
     );
     // Setup problem (missing SLR), not game chatter — always surface once.
-    eprintln!("proton-cli: warning: install SteamLinuxRuntime (via Steam) for better compatibility");
+    eprintln!("protoncli: warning: install SteamLinuxRuntime (via Steam) for better compatibility");
 
     Ok(cmd.status()?)
 }

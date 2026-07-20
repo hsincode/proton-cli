@@ -6,12 +6,12 @@ use clap::{Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "proton-cli",
+    name = "protoncli",
     version,
     about = "Run Windows games/apps via umu + Proton (dwproton by default)",
     long_about = "Thin CLI orchestrator around umu-run and Proton.\n\
                   Run with no subcommand for a minimal setup TUI.\n\
-                  Does not bundle Proton; install a runtime with `proton-cli proton install`.\n\
+                  Does not bundle Proton; install a runtime with `protoncli proton install`.\n\
                   Requires umu-launcher on PATH for Steam-equivalent launches.\n\
                   Wine prefixes live under ~/.protoncli (default: ~/.protoncli/default)."
 )]

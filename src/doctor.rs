@@ -60,7 +60,7 @@ pub fn run_doctor(paths: &Paths, config: &Config) -> DoctorReport {
     let default_proton =
         proton::resolve_proton_path(paths, &config.proton, &config.proton.default).ok();
 
-    let proton_cli_on_path = which::which("proton-cli").is_ok();
+    let proton_cli_on_path = which::which("protoncli").is_ok();
 
     DoctorReport {
         config_path: paths.config_dir.clone(),
@@ -75,7 +75,7 @@ pub fn run_doctor(paths: &Paths, config: &Config) -> DoctorReport {
 }
 
 pub fn print_report(report: &DoctorReport) {
-    println!("proton-cli doctor");
+    println!("protoncli doctor");
     println!("-----------------");
     println!("root       : {}", report.data_path.display());
     println!(
@@ -145,11 +145,21 @@ pub fn print_report(report: &DoctorReport) {
 
     if report.protons.is_empty() {
         println!("Proton     : none found");
-        println!("  Steam に Proton を入れるか: proton-cli proton install");
+        println!("  Steam に Proton を入れるか: protoncli proton install");
     } else {
-        println!("Proton installs:");
+        println!("Proton installs (★ = default):");
         for p in &report.protons {
-            println!("  [{}] {} ({})", p.source, p.name, p.path.display());
+            let mark = report
+                .default_proton
+                .as_ref()
+                .is_some_and(|d| d == &p.path);
+            println!(
+                "  {}[{}] {} ({})",
+                if mark { "★ " } else { "  " },
+                p.source,
+                p.name,
+                p.path.display()
+            );
         }
     }
 
@@ -159,14 +169,14 @@ pub fn print_report(report: &DoctorReport) {
     }
 
     if report.proton_cli_on_path {
-        println!("PATH       : proton-cli found (desktop shortcuts will work)");
+        println!("PATH       : protoncli found (desktop shortcuts will work)");
     } else {
-        println!("PATH       : proton-cli NOT on PATH");
-        println!("  Desktop shortcuts use `Exec=proton-cli launch <id>`.");
+        println!("PATH       : protoncli NOT on PATH");
+        println!("  Desktop shortcuts use `Exec=protoncli launch <id>`.");
         println!("  Ensure `~/.cargo/bin` (or install prefix) is on PATH.");
     }
 
     println!();
     println!("note: Steam は umu-run を同梱しません。");
-    println!("      Proton + SteamLinuxRuntime があれば proton-cli は Steam 経路で起動します。");
+    println!("      Proton + SteamLinuxRuntime があれば protoncli は Steam 経路で起動します。");
 }

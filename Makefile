@@ -1,8 +1,8 @@
-# proton-cli development helpers
+# protoncli development helpers
 # CI と同じく --locked を既定にする（Cargo.lock を正とする）
 
 CARGO ?= cargo
-BIN    := proton-cli
+BIN    := protoncli
 
 .PHONY: help check test build release run install install-local \
         fmt fmt-check clippy package clean ci doctor
@@ -26,7 +26,7 @@ release: ## リリースビルド（CI 相当）
 # 例: make run                 → 最新ソースで TUI
 #     make run ARGS='doctor'
 #     make run ARGS='launch my-game'
-# PATH 上の古い ~/.cargo/bin/proton-cli は使わない（必ず target/debug を起動）。
+# PATH 上の古い ~/.cargo/bin は使わない（必ず target/debug を起動）。
 run: build ## ソースをビルドしてから実行（最新版）。ARGS 省略で TUI
 	./target/debug/$(BIN) $(ARGS)
 

@@ -9,7 +9,7 @@
 //!   runtimes/             # managed Proton (dwproton, …)
 //!   icons/
 //! ~/.local/share/applications/
-//!   proton-cli-<id>.desktop
+//!   protoncli-<id>.desktop
 //! ```
 
 use std::fs;
@@ -25,7 +25,7 @@ pub const DEFAULT_PREFIX_ID: &str = "default";
 /// Root directory name under `$HOME`.
 pub const ROOT_DIR_NAME: &str = ".protoncli";
 
-/// Resolved filesystem layout for one proton-cli instance.
+/// Resolved filesystem layout for one protoncli instance.
 #[derive(Debug, Clone)]
 pub struct Paths {
     /// `~/.protoncli`
@@ -128,7 +128,7 @@ impl Paths {
 
     pub fn desktop_file(&self, app_id: &str) -> PathBuf {
         self.applications_dir
-            .join(format!("proton-cli-{app_id}.desktop"))
+            .join(format!("protoncli-{app_id}.desktop"))
     }
 }
 

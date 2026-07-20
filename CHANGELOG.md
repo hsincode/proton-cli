@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.3
+
+- 実行ファイル / コマンド名を **`protoncli`** に統一（旧 `proton-cli` バイナリ名は廃止）。`.desktop` も `Exec=protoncli launch …` / `protoncli-<id>.desktop`。
+- TUI **Proton settings**:
+  - 現在使っている Proton を **★ + 緑** で表示（カーソル上なら緑背景）。
+  - 一覧から **Enter / Space** で default を切替（`prefer` も source に合わせる）。
+  - 上部に Using / PROTONPATH を表示。prefer の有効側（[m]/[t]）も色分け。
+- `doctor` でも default Proton に ★ を付与。
+
 ## 0.1.2
 
 - TUI 初回起動で起動ロケール（日本語 / English）を選択。`config.locale` に保存し、`launch` / `run` で `LANG` / `LC_*` を付与（ホストへの locale-gen 不要）。カタログは拡張前提（UI は当面 2 択）。
@@ -33,4 +42,4 @@
 - `add`/`run` default prefix is `default` (configurable via `default_prefix`).
 - No-args / `tui` command: minimal setup TUI (apps, register, prefixes, proton, doctor).
 - `prefix list|create|path` subcommands.
-- crates.io package name: **`protoncli`** (binary: `proton-cli`).
+- crates.io package name: **`protoncli`** (binary was historically `proton-cli`).

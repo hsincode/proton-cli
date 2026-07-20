@@ -1,7 +1,7 @@
 [package]
 # crates.io の package 名（`proton-cli` は 0.0.0 スタブに占有されているため protoncli）
 name = "protoncli"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 rust-version = "1.80"
 description = "CLI launcher for Windows games/apps via umu + Proton (dwproton by default)"
@@ -15,8 +15,8 @@ authors = ["xuanling"]
 exclude = [".git*", "target/"]
 
 [[bin]]
-# インストール後のコマンド名は従来どおり proton-cli
-name = "proton-cli"
+# crates.io パッケージ名・コマンド名とも protoncli（旧 proton-cli バイナリ名は廃止）
+name = "protoncli"
 path = "src/main.rs"
 
 [dependencies]

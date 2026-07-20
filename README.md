@@ -9,7 +9,7 @@ Linux 上で Windows のゲーム・アプリを起動するための **CLI + �
 
 ## 必要なもの（インストール必須・任意）
 
-`proton-cli` 単体ではゲームは起動しません。次を揃えてください。
+`protoncli` 単体ではゲームは起動しません。次を揃えてください。
 
 ### 必須（どちらかの経路）
 
@@ -22,7 +22,7 @@ Linux 上で Windows のゲーム・アプリを起動するための **CLI + �
 | **Proton**（Steam 同梱 / GE / dwproton） | Windows 互換 |
 | **GPU ドライバ**（Vulkan） | DXVK / 描画 |
 
-`umu-run` は **不要** です。Steam は `umu-run` を同梱しませんが、proton-cli は  
+`umu-run` は **不要** です。Steam は `umu-run` を同梱しませんが、protoncli は  
 `SteamLinuxRuntime + proton` で Steam と同じ系統の起動ができます。
 
 **経路 B — umu-launcher（Steam なしでも可）**
@@ -30,14 +30,14 @@ Linux 上で Windows のゲーム・アプリを起動するための **CLI + �
 | もの | 役割 |
 |------|------|
 | **[umu-launcher](https://github.com/Open-Wine-Components/umu-launcher)**（`umu-run`） | Steam 外向けの統合ランチャ |
-| **Proton** | `proton-cli proton install` または既存ビルド |
+| **Proton** | `protoncli proton install` または既存ビルド |
 | **GPU ドライバ**（Vulkan） | 同上 |
 
 ```bash
 # 経路 B の例
 # Arch:   pacman -S umu-launcher
 # Fedora: dnf install umu-launcher
-proton-cli proton install
+protoncli proton install
 ```
 
 起動時の優先順位: **umu-run があれば umu** → なければ **Steam 経路**。
@@ -61,16 +61,15 @@ proton-cli proton install
 ### よくある誤解
 
 - **Steam が入っていても `umu-run` は出てきません。** Steam ≠ umu。  
-  proton-cli 0.1.1+ は Steam 経路にフォールバックするので、`umu-run not found` でも起動できます。
+  protoncli 0.1.1+ は Steam 経路にフォールバックするので、`umu-run not found` でも起動できます。
 - Steam の Proton / dwproton / GE-Proton は自動検出します。
 - Steam ストアのゲーム起動や anti-cheat は本ツールの対象外です。
 
 ---
 
-## インストール（proton-cli 本体）
+## インストール（protoncli 本体）
 
-crates.io の **パッケージ名は `protoncli`** です（`proton-cli` は既存クレートに取られているため）。  
-インストール後の **コマンド名は `proton-cli`** のままです。
+crates.io の **パッケージ名もコマンド名も `protoncli`** です（クレート名 `proton-cli` は既存スタブに占有されているため使えません）。
 
 ```bash
 # crates.io
@@ -83,13 +82,13 @@ cargo install --git https://codeberg.org/xuanling/proton-cli.git
 cargo install --path .
 ```
 
-`proton-cli` が **PATH 上**にあること（例: `~/.cargo/bin`）。  
-アプリメニューのショートカットは `Exec=proton-cli launch <id>` のため、PATH が通っていないとメニューから起動できません。
+`protoncli` が **PATH 上**にあること（例: `~/.cargo/bin`）。  
+アプリメニューのショートカットは `Exec=protoncli launch <id>` のため、PATH が通っていないとメニューから起動できません。
 
 導入後の健全性確認:
 
 ```bash
-proton-cli doctor
+protoncli doctor
 ```
 
 `umu-run` や Proton が無い場合はここで不足が分かります。
@@ -100,23 +99,23 @@ proton-cli doctor
 
 ```bash
 # 1. 依存確認（umu / Proton / PATH）
-proton-cli doctor
+protoncli doctor
 
 # 2. umu が入っていること（ディストロで先に導入）
 # 3. dwproton を ~/.protoncli/runtimes に入れる（Steam 不要）
-proton-cli proton install
+protoncli proton install
 
 # 4. アプリ登録（既定 wineprefix = ~/.protoncli/default）
-proton-cli add --name "My Game" --exe /path/to/Game.exe
+protoncli add --name "My Game" --exe /path/to/Game.exe
 
 # 専用 prefix を指定する場合
-proton-cli add --name "Other" --exe /path/to/Other.exe --prefix other-game
+protoncli add --name "Other" --exe /path/to/Other.exe --prefix other-game
 
 # 5. 起動
-proton-cli launch my-game
+protoncli launch my-game
 
 # 対話セットアップ TUI（引数なし）
-proton-cli
+protoncli
 ```
 
 ---
@@ -134,15 +133,15 @@ proton-cli
 
 ```bash
 # 共有 default
-proton-cli add --name "A" --exe ./A.exe
+protoncli add --name "A" --exe ./A.exe
 
 # 専用 bottle
-proton-cli add --name "B" --exe ./B.exe --prefix my-b-prefix
+protoncli add --name "B" --exe ./B.exe --prefix my-b-prefix
 # → ~/.protoncli/prefixes/my-b-prefix
 
-proton-cli prefix list
-proton-cli prefix create indie-game
-proton-cli prefix path default
+protoncli prefix list
+protoncli prefix create indie-game
+protoncli prefix path default
 ```
 
 ---
@@ -159,7 +158,7 @@ proton-cli prefix path default
   icons/
 
 ~/.local/share/applications/
-  proton-cli-<id>.desktop  # アプリメニュー用（任意・登録時に作成）
+  protoncli-<id>.desktop  # アプリメニュー用（任意・登録時に作成）
 ```
 
 Proton 解決時は、managed（`~/.protoncli/runtimes`）に加え、Steam が入っていれば  
@@ -170,9 +169,9 @@ Proton 解決時は、managed（`~/.protoncli/runtimes`）に加え、Steam が�
 ## TUI（引数なし）
 
 ```bash
-proton-cli
+protoncli
 # または
-proton-cli tui
+protoncli tui
 ```
 
 ゲーム前に触りそうな項目だけのミニマル UI です。
@@ -253,15 +252,15 @@ create_on_add = true
 categories = ["Game"]
 ```
 
-- `prefer = "managed"` … `~/.protoncli/runtimes` と `proton-cli proton install` を主に使う（**Steam 不要**）
+- `prefer = "managed"` … `~/.protoncli/runtimes` と `protoncli proton install` を主に使う（**Steam 不要**）
 - `prefer = "steam"` … Steam 配下の Proton を優先（**Steam の導入と、そこに Proton があることが前提**）
 - `locale` … グローバル起動ロケール（`ja` / `en`）。アプリに `locale` が無ければこれを使う
 - `[launch].sanitize_vulkan` … ホストの `VK_ICD_FILENAMES` / `VK_DRIVER_FILES` を起動時に外す（Steam/Lutris 相当。x86_64 ICD だけ指定されていると 32bit が落ちる）
 - `[launch].graphics` … グローバル D3D バックエンド（`dxvk` / `wined3d`）
 - `[launch].log_level` … 起動時の端末ログ（`quiet` / `normal` / `verbose`）。TUI の Launch settings、または `run --log-level quiet`
-  - **quiet** … 子プロセス（umu/Proton/Wine）の stdout/stderr を捨て、proton-cli のバナーも出さない
+  - **quiet** … 子プロセス（umu/Proton/Wine）の stdout/stderr を捨て、protoncli のバナーも出さない
   - **normal** … 従来どおり子の出力を端末に出す（既定）
-  - **verbose** … normal に加え proton-cli 側の起動診断を追加
+  - **verbose** … normal に加え protoncli 側の起動診断を追加
 - アプリ個別: `apps.toml` の `locale` / `graphics`、TUI の Apps → **`o`**、または `add --locale ja --graphics dxvk` / `run --locale en --graphics wined3d`
 - 優先順位（env キーごと）: **アプリ `env`（生の LANG 等） > アプリ locale/graphics > グローバル**
 
@@ -270,7 +269,7 @@ categories = ["Game"]
 ## 起動の流れ
 
 ```
-proton-cli launch <id>
+protoncli launch <id>
   → WINEPREFIX=~/.protoncli/…  PROTONPATH=…  GAMEID=…
   → umu-run /path/to/game.exe
 ```
@@ -285,8 +284,8 @@ proton-cli launch <id>
 
 1. **GPU ドライバ（Vulkan）**
 2. **Steam** を入れ、Proton と Steam Linux Runtime を用意（通常は Steam が自動）
-3. **proton-cli** … `cargo install protoncli`
-4. `proton-cli doctor` で **backend=steam** と **PROTONPATH** を確認
+3. **protoncli** … `cargo install protoncli`
+4. `protoncli doctor` で **backend=steam** と **PROTONPATH** を確認
 5. `add` → `launch`
 
 | チェック | 必須? |
@@ -301,7 +300,7 @@ proton-cli launch <id>
 | 項目 | 値 |
 |------|-----|
 | package | **`protoncli`**（`cargo install protoncli`） |
-| バイナリ | **`proton-cli`** |
+| バイナリ / コマンド | **`protoncli`** |
 | リポジトリ | https://codeberg.org/xuanling/proton-cli |
 
 ---

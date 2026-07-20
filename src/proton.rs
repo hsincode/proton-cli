@@ -167,7 +167,7 @@ pub fn resolve_proton_path(
 pub fn install_dwproton(paths: &Paths, version: Option<&str>, force: bool) -> Result<PathBuf> {
     paths.ensure_dirs()?;
     let client = reqwest::blocking::Client::builder()
-        .user_agent(concat!("proton-cli/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("protoncli/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| Error::Download(e.to_string()))?;
 
