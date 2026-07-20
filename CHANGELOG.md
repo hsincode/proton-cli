@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.1.4
+
+- 既定起動 env: `DXVK_HUD=0` / `STEAMOS=1` / `UMU_USE_STEAM=1`（`[launch.env]`、未記載時はビルトイン）。
+- TUI **Environment variables**（Home）: グローバル env の一覧・追加・編集・削除・ビルトインへリセット。
+- アプリ別 env: Default / Custom 切替。Custom はグローバル既定に **追加**（同キーは上書き）。Apps → `o`/`e` → Env。
+- Apps 一覧で設定キー **`e`** を `o` と同じく受付。
+- `protoncli add --exe path` のみで登録可（`--name` 省略時は exe の stem）。表示名は Apps → settings → Name で後から変更可。
+- TUI ナビを全画面で統一: **j/k**（一覧）、**Ctrl+n / Ctrl+p**（次/前、フォームでも可）、**Ctrl+j / Ctrl+k**、↑↓、Tab（フォーム）。
+
 ## 0.1.3
 
 - 実行ファイル / コマンド名を **`protoncli`** に統一（旧 `proton-cli` バイナリ名は廃止）。`.desktop` も `Exec=protoncli launch …` / `protoncli-<id>.desktop`。

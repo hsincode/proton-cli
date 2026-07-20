@@ -106,6 +106,9 @@ protoncli doctor
 protoncli proton install
 
 # 4. アプリ登録（既定 wineprefix = ~/.protoncli/default）
+# --name 省略時は exe のファイル名（stem）が名前になる → あとから TUI で変更可
+protoncli add --exe /path/to/Game.exe
+# または明示名
 protoncli add --name "My Game" --exe /path/to/Game.exe
 
 # 専用 prefix を指定する場合
@@ -209,7 +212,7 @@ CLI から本編を最初から登録するなら、従来どおり `add --exe /
 | コマンド | 説明 |
 |----------|------|
 | （なし）/ `tui` | セットアップ TUI |
-| `add --name --exe [--prefix]` | 登録 + 既定で `.desktop` |
+| `add --exe [--name] [--prefix]` | 登録 + 既定で `.desktop`（`--name` 省略時は exe stem） |
 | `launch <id>` | 登録アプリを起動 |
 | `run <exe>` | 未登録のワンショット起動 |
 | `list` / `remove` | アプリ管理 |
@@ -244,6 +247,13 @@ graphics = "dxvk"
 # quiet は umu / Proton / Wine の stdout・stderr を捨てる（日々のプレイ向け）
 # log_level = "quiet"
 
+# 全アプリ共通の起動環境変数（未記載時は下記ビルトインが使われる）
+# dwproton は未設定だと DXVK_HUD=compiler を入れ「Compiling shaders...」を出すため 0 で消す
+[launch.env]
+DXVK_HUD = "0"
+STEAMOS = "1"
+UMU_USE_STEAM = "1"
+
 [umu]
 # command = "/usr/bin/umu-run"   # PATH に無いときだけ指定
 
@@ -261,8 +271,11 @@ categories = ["Game"]
   - **quiet** … 子プロセス（umu/Proton/Wine）の stdout/stderr を捨て、protoncli のバナーも出さない
   - **normal** … 従来どおり子の出力を端末に出す（既定）
   - **verbose** … normal に加え protoncli 側の起動診断を追加
-- アプリ個別: `apps.toml` の `locale` / `graphics`、TUI の Apps → **`o`**、または `add --locale ja --graphics dxvk` / `run --locale en --graphics wined3d`
-- 優先順位（env キーごと）: **アプリ `env`（生の LANG 等） > アプリ locale/graphics > グローバル**
+- `[launch.env]` … 全起動に付与する環境変数。未記載時は `DXVK_HUD=0` / `STEAMOS=1` / `UMU_USE_STEAM=1`。TUI Home → **Environment variables** で編集・ビルトインへリセット可
+- アプリ個別: `apps.toml` の `locale` / `graphics` / `use_custom_env` + `env`、TUI の Apps → **`o` または `e`**、または `add --locale ja --graphics dxvk` / `run --locale en --graphics wined3d`
+  - **env モード default**（既定）… グローバル `[launch.env]` のみ
+  - **env モード custom** … グローバル既定の**上に**アプリ `env` を追加（同じキーは上書き）
+- 優先順位（env キーごと）: **アプリ custom env > グローバル `[launch.env]` > アプリ locale/graphics 由来 > （それ以外）**
 
 ---
 

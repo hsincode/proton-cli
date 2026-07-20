@@ -2,9 +2,9 @@
 //!
 //! Covers the settings a player typically needs before launching games:
 //! app list / launch, register app, wine prefixes, Proton runtime, launch settings
-//! (locale / graphics / Vulkan sanitize / log level), doctor.
+//! (locale / graphics / Vulkan sanitize / log level), **environment variables**, doctor.
 //! On first run (`config.locale` unset) a locale picker is shown before the home menu.
-//! Per-app locale / graphics / **exe** can be set from the Apps list (`o` key).
+//! Per-app locale / graphics / **exe** / **env** can be set from the Apps list (`o` or `e`).
 //! Exe change uses a filtered browser (dirs + `.exe` only) over the wineprefix or host FS.
 
 use std::io::{self, stdout};
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crossterm::cursor::{Hide, Show};
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -43,15 +43,20 @@ const LAUNCH_SET_LOG_LEVEL: usize = 3;
 const LAUNCH_SET_LEN: usize = 4;
 
 /// Rows on the per-app settings screen.
-const APP_SET_EXE: usize = 0;
-const APP_SET_LOCALE: usize = 1;
-const APP_SET_GRAPHICS: usize = 2;
-const APP_SET_LEN: usize = 3;
+const APP_SET_NAME: usize = 0;
+const APP_SET_EXE: usize = 1;
+const APP_SET_LOCALE: usize = 2;
+const APP_SET_GRAPHICS: usize = 3;
+const APP_SET_ENV: usize = 4;
+const APP_SET_LEN: usize = 5;
 
 /// Rows on the “where to browse for exe” chooser.
 const EXE_MODE_PREFIX: usize = 0;
 const EXE_MODE_FILESYSTEM: usize = 1;
 const EXE_MODE_LEN: usize = 2;
+
+/// First row on AppEnv is the Default/Custom mode toggle; env pairs follow.
+const APP_ENV_MODE_ROW: usize = 0;
 
 // --- palette (subtle; readable on dark and light-ish terminals) ------------
 
@@ -134,10 +139,18 @@ enum Screen {
     Locale,
     /// Global launch options: locale, graphics, Vulkan sanitize, log level.
     LaunchSettings,
+    /// Global default environment variables (`config.launch.env`).
+    EnvSettings,
+    /// Add / edit a single KEY=VALUE (global or per-app custom).
+    EnvEdit,
     /// Per-app locale picker (inherit or override).
     AppLocale,
-    /// Per-app launch options: exe + locale + graphics.
+    /// Per-app launch options: name + exe + locale + graphics + env.
     AppSettings,
+    /// Edit display name for the open app.
+    AppNameEdit,
+    /// Per-app env: Default vs Custom (+ extra KEY=VALUE list).
+    AppEnv,
     /// Choose wineprefix vs host filesystem before the exe browser.
     ExeBrowseMode,
     /// Filtered dir browser (directories + `.exe` only).
@@ -157,6 +170,19 @@ enum AddField {
     Id,
     Prefix,
     Proton,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvEditField {
+    Key,
+    Value,
+}
+
+/// Whether EnvEdit / EnvSettings list targets global or per-app custom env.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EnvScope {
+    Global,
+    App,
 }
 
 struct App {
@@ -186,12 +212,27 @@ struct App {
     app_settings_id: Option<String>,
     /// Current exe path for the app open in AppSettings (cached display + apply).
     app_settings_exe: PathBuf,
+    /// Display name while AppSettings / AppNameEdit is open.
+    app_settings_name: String,
     /// Selected row on [`Screen::LaunchSettings`].
     launch_set_sel: usize,
     /// Selected row on [`Screen::AppSettings`].
     app_set_sel: usize,
     /// Per-app graphics picker index (0 = inherit, 1 = dxvk, 2 = wined3d).
     app_graphics_sel: usize,
+    /// Selected row on global EnvSettings (index into sorted keys).
+    env_sel: usize,
+    /// Selected row on AppEnv (0 = mode toggle; 1+ = custom env keys).
+    app_env_sel: usize,
+    /// Cached `use_custom_env` while AppEnv / AppSettings is open.
+    app_use_custom_env: bool,
+    /// Scope for EnvEdit and for which map a/d operate on.
+    env_scope: EnvScope,
+    env_edit_key: String,
+    env_edit_value: String,
+    env_edit_field: EnvEditField,
+    /// Previous key when editing an existing entry (rename removes the old key).
+    env_edit_original_key: Option<String>,
     /// Selected row on [`Screen::ExeBrowseMode`].
     exe_browse_mode_sel: usize,
     /// Current directory in [`Screen::ExeBrowser`].
@@ -217,6 +258,7 @@ const HOME_ITEMS: &[&str] = &[
     "Wine prefixes",
     "Proton settings",
     "Launch settings (locale / graphics / log)",
+    "Environment variables",
     "Doctor (health check)",
     "Quit",
 ];
@@ -301,9 +343,18 @@ impl App {
             app_locale_sel: 0,
             app_settings_id: None,
             app_settings_exe: PathBuf::new(),
+            app_settings_name: String::new(),
             launch_set_sel: 0,
             app_set_sel: 0,
             app_graphics_sel: 0,
+            env_sel: 0,
+            app_env_sel: 0,
+            app_use_custom_env: false,
+            env_scope: EnvScope::Global,
+            env_edit_key: String::new(),
+            env_edit_value: String::new(),
+            env_edit_field: EnvEditField::Key,
+            env_edit_original_key: None,
             exe_browse_mode_sel: 0,
             browse_cwd: PathBuf::new(),
             browse_floor: None,
@@ -424,12 +475,298 @@ impl App {
         let entry = db.get(&id)?;
         self.app_locale_sel = locale::app_picker_index(entry.locale.as_deref());
         self.app_graphics_sel = app_graphics_picker_index(entry.graphics.as_deref());
+        self.app_use_custom_env = entry.use_custom_env;
         self.app_settings_exe = entry.exe.clone();
+        self.app_settings_name = entry.name.clone();
         self.app_settings_id = Some(id.clone());
         self.app_set_sel = 0;
-        self.status = format!("settings for `{id}`  ↑↓  Enter edit  Esc back");
+        self.status = format!(
+            "settings for `{id}`  ↑↓/jk/C-n C-p  Enter edit  Esc back"
+        );
         self.screen = Screen::AppSettings;
         Ok(())
+    }
+
+    fn open_app_name_edit(&mut self) {
+        let id = self.app_settings_id.as_deref().unwrap_or("?");
+        self.status = format!("edit name for `{id}`  Enter save  Esc cancel");
+        self.screen = Screen::AppNameEdit;
+    }
+
+    fn apply_app_name(&mut self) -> Result<()> {
+        let Some(id) = self.app_settings_id.clone() else {
+            self.status = "no app selected".into();
+            return Ok(());
+        };
+        let name = self.app_settings_name.trim().to_string();
+        if name.is_empty() {
+            self.status = "name required".into();
+            return Ok(());
+        }
+        let mut db = AppsDb::load(&self.paths)?;
+        let entry = db
+            .apps
+            .get_mut(&id)
+            .ok_or_else(|| Error::AppNotFound(id.clone()))?;
+        entry.name = name.clone();
+        let desktop = entry.desktop;
+        let entry_snapshot = entry.clone();
+        db.save(&self.paths)?;
+        if desktop {
+            if let Err(e) =
+                desktop::install_shortcut(&self.paths, &self.config.desktop, &id, &entry_snapshot)
+            {
+                self.status = format!("name updated for `{id}` but desktop refresh failed: {e}");
+                self.screen = Screen::AppSettings;
+                return Ok(());
+            }
+        }
+        self.app_settings_name = name.clone();
+        self.status = format!("`{id}` name → {name}");
+        self.screen = Screen::AppSettings;
+        Ok(())
+    }
+
+    fn open_global_env_settings(&mut self) {
+        self.env_scope = EnvScope::Global;
+        self.env_sel = 0;
+        self.status =
+            "Global env  ↑↓  Enter/e edit  a add  d del  r reset defaults  Esc back".into();
+        self.screen = Screen::EnvSettings;
+    }
+
+    fn open_app_env_settings(&mut self) -> Result<()> {
+        let Some(id) = self.app_settings_id.clone() else {
+            self.status = "no app selected".into();
+            return Ok(());
+        };
+        let db = AppsDb::load(&self.paths)?;
+        let entry = db.get(&id)?;
+        self.app_use_custom_env = entry.use_custom_env;
+        self.env_scope = EnvScope::App;
+        self.app_env_sel = 0;
+        self.status = format!(
+            "env for `{id}`  ↑↓  Enter  a add  d del  Esc back (custom layers on defaults)"
+        );
+        self.screen = Screen::AppEnv;
+        Ok(())
+    }
+
+    /// Sorted keys for the map currently edited by env screens.
+    fn env_keys_for_scope(&self) -> Result<Vec<String>> {
+        match self.env_scope {
+            EnvScope::Global => Ok(self.config.launch.env.keys().cloned().collect()),
+            EnvScope::App => {
+                let Some(id) = self.app_settings_id.as_deref() else {
+                    return Ok(Vec::new());
+                };
+                let db = AppsDb::load(&self.paths)?;
+                let entry = db.get(id)?;
+                Ok(entry.env.keys().cloned().collect())
+            }
+        }
+    }
+
+    fn toggle_app_custom_env(&mut self) -> Result<()> {
+        let Some(id) = self.app_settings_id.clone() else {
+            self.status = "no app selected".into();
+            return Ok(());
+        };
+        let mut db = AppsDb::load(&self.paths)?;
+        let entry = db
+            .apps
+            .get_mut(&id)
+            .ok_or_else(|| Error::AppNotFound(id.clone()))?;
+        entry.use_custom_env = !entry.use_custom_env;
+        self.app_use_custom_env = entry.use_custom_env;
+        let mode = if entry.use_custom_env {
+            "custom (defaults + extras; extras override)"
+        } else {
+            "default (global [launch.env] only)"
+        };
+        db.save(&self.paths)?;
+        self.status = format!("`{id}` env mode = {mode}");
+        Ok(())
+    }
+
+    fn start_env_edit_new(&mut self) {
+        self.env_edit_key.clear();
+        self.env_edit_value.clear();
+        self.env_edit_field = EnvEditField::Key;
+        self.env_edit_original_key = None;
+        self.status = "New env  Tab field  Enter save  Esc cancel".into();
+        self.screen = Screen::EnvEdit;
+    }
+
+    fn start_env_edit_existing(&mut self, key: &str, value: &str) {
+        self.env_edit_key = key.to_string();
+        self.env_edit_value = value.to_string();
+        self.env_edit_field = EnvEditField::Value;
+        self.env_edit_original_key = Some(key.to_string());
+        self.status = format!("Edit `{key}`  Tab field  Enter save  Esc cancel");
+        self.screen = Screen::EnvEdit;
+    }
+
+    fn save_env_edit(&mut self) -> Result<()> {
+        let key = self.env_edit_key.trim().to_string();
+        if key.is_empty() {
+            self.status = "env key required".into();
+            return Ok(());
+        }
+        if key.contains('=') || key.contains('\0') || key.contains('\n') {
+            self.status = "invalid env key (no '=' or control chars)".into();
+            return Ok(());
+        }
+        let value = self.env_edit_value.clone();
+        let original = self.env_edit_original_key.clone();
+
+        match self.env_scope {
+            EnvScope::Global => {
+                if let Some(ref old) = original {
+                    if old != &key {
+                        self.config.launch.env.remove(old);
+                    }
+                }
+                self.config.launch.env.insert(key.clone(), value);
+                self.config.save(&self.paths)?;
+                // Keep selection on the saved key.
+                let keys: Vec<_> = self.config.launch.env.keys().cloned().collect();
+                self.env_sel = keys.iter().position(|k| k == &key).unwrap_or(0);
+                self.status = format!("global env `{key}` saved");
+                self.screen = Screen::EnvSettings;
+            }
+            EnvScope::App => {
+                let Some(id) = self.app_settings_id.clone() else {
+                    self.status = "no app selected".into();
+                    return Ok(());
+                };
+                let mut db = AppsDb::load(&self.paths)?;
+                {
+                    let entry = db
+                        .apps
+                        .get_mut(&id)
+                        .ok_or_else(|| Error::AppNotFound(id.clone()))?;
+                    // Editing extras implies custom mode so the value is actually applied.
+                    entry.use_custom_env = true;
+                    if let Some(ref old) = original {
+                        if old != &key {
+                            entry.env.remove(old);
+                        }
+                    }
+                    entry.env.insert(key.clone(), value.clone());
+                }
+                self.app_use_custom_env = true;
+                db.save(&self.paths)?;
+                let keys: Vec<_> = db
+                    .apps
+                    .get(&id)
+                    .map(|e| e.env.keys().cloned().collect())
+                    .unwrap_or_default();
+                // app_env_sel: 0 = mode, 1+ = keys
+                self.app_env_sel = keys
+                    .iter()
+                    .position(|k| k == &key)
+                    .map(|i| i + 1)
+                    .unwrap_or(0);
+                self.status = format!("`{id}` custom env `{key}` saved (layers on defaults)");
+                self.screen = Screen::AppEnv;
+            }
+        }
+        Ok(())
+    }
+
+    fn delete_env_at_selection(&mut self) -> Result<()> {
+        match self.env_scope {
+            EnvScope::Global => {
+                let keys: Vec<_> = self.config.launch.env.keys().cloned().collect();
+                if keys.is_empty() {
+                    self.status = "no global env entries".into();
+                    return Ok(());
+                }
+                let i = self.env_sel.min(keys.len() - 1);
+                let key = keys[i].clone();
+                self.config.launch.env.remove(&key);
+                self.config.save(&self.paths)?;
+                if self.env_sel > 0 && self.env_sel >= self.config.launch.env.len() {
+                    self.env_sel = self.env_sel.saturating_sub(1);
+                }
+                self.status = format!("removed global env `{key}`");
+            }
+            EnvScope::App => {
+                let Some(id) = self.app_settings_id.clone() else {
+                    self.status = "no app selected".into();
+                    return Ok(());
+                };
+                if self.app_env_sel == APP_ENV_MODE_ROW {
+                    self.status = "select an env row to delete (not the mode row)".into();
+                    return Ok(());
+                }
+                let mut db = AppsDb::load(&self.paths)?;
+                let keys: Vec<_> = db
+                    .apps
+                    .get(&id)
+                    .map(|e| e.env.keys().cloned().collect())
+                    .unwrap_or_default();
+                let ki = self.app_env_sel - 1;
+                if ki >= keys.len() {
+                    self.status = "no env entry selected".into();
+                    return Ok(());
+                }
+                let key = keys[ki].clone();
+                let n = {
+                    let entry = db
+                        .apps
+                        .get_mut(&id)
+                        .ok_or_else(|| Error::AppNotFound(id.clone()))?;
+                    entry.env.remove(&key);
+                    entry.env.len()
+                };
+                db.save(&self.paths)?;
+                // Clamp: mode + n keys (last index is n when n keys remain)
+                let max = n;
+                if self.app_env_sel > max {
+                    self.app_env_sel = max;
+                }
+                self.status = format!("removed `{id}` env `{key}`");
+            }
+        }
+        Ok(())
+    }
+
+    fn reset_global_env_defaults(&mut self) -> Result<()> {
+        self.config.launch.env = config::builtin_launch_env();
+        self.config.save(&self.paths)?;
+        self.env_sel = 0;
+        self.status =
+            "global env reset to built-ins (DXVK_HUD=0, STEAMOS=1, UMU_USE_STEAM=1)".into();
+        Ok(())
+    }
+
+    fn env_value_for_scope(&self, key: &str) -> Result<Option<String>> {
+        match self.env_scope {
+            EnvScope::Global => Ok(self.config.launch.env.get(key).cloned()),
+            EnvScope::App => {
+                let Some(id) = self.app_settings_id.as_deref() else {
+                    return Ok(None);
+                };
+                let db = AppsDb::load(&self.paths)?;
+                Ok(db.get(id)?.env.get(key).cloned())
+            }
+        }
+    }
+
+    fn leave_env_edit(&mut self) {
+        match self.env_scope {
+            EnvScope::Global => {
+                self.status = "Global env  ↑↓  Enter/e edit  a add  d del  r reset  Esc".into();
+                self.screen = Screen::EnvSettings;
+            }
+            EnvScope::App => {
+                let id = self.app_settings_id.as_deref().unwrap_or("?");
+                self.status = format!("env for `{id}`  ↑↓  Enter  a add  d del  Esc");
+                self.screen = Screen::AppEnv;
+            }
+        }
     }
 
     /// After installers land files in the bottle, point the registered app at the real exe.
@@ -762,7 +1099,7 @@ fn app_loop(
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
-                    handle_key(app, key.code)?;
+                    handle_key(app, key)?;
                 }
                 // Fullscreen games often change the PTY size; force full paint.
                 Event::Resize(_, _) => {
@@ -782,136 +1119,147 @@ fn drain_pending_events() {
     }
 }
 
-fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
+fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match app.screen {
-        Screen::LocaleSetup | Screen::Locale | Screen::AppLocale => handle_locale_key(app, code)?,
-        Screen::LaunchSettings => handle_launch_settings_key(app, code)?,
-        Screen::AppSettings => handle_app_settings_key(app, code)?,
-        Screen::ExeBrowseMode => handle_exe_browse_mode_key(app, code)?,
-        Screen::ExeBrowser => handle_exe_browser_key(app, code)?,
-        Screen::Home => match code {
-            KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
-            KeyCode::Up | KeyCode::Char('k') => {
+        Screen::LocaleSetup | Screen::Locale | Screen::AppLocale => handle_locale_key(app, key)?,
+        Screen::LaunchSettings => handle_launch_settings_key(app, key)?,
+        Screen::EnvSettings => handle_env_settings_key(app, key)?,
+        Screen::EnvEdit => handle_env_edit_key(app, key)?,
+        Screen::AppEnv => handle_app_env_key(app, key)?,
+        Screen::AppSettings => handle_app_settings_key(app, key)?,
+        Screen::AppNameEdit => handle_app_name_edit_key(app, key)?,
+        Screen::ExeBrowseMode => handle_exe_browse_mode_key(app, key)?,
+        Screen::ExeBrowser => handle_exe_browser_key(app, key)?,
+        Screen::Home => {
+            if is_nav_prev(key, NavMode::List) {
                 if app.home_idx > 0 {
                     app.home_idx -= 1;
                 }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
+            } else if is_nav_next(key, NavMode::List) {
                 if app.home_idx + 1 < HOME_ITEMS.len() {
                     app.home_idx += 1;
                 }
-            }
-            KeyCode::Enter => match app.home_idx {
-                0 => {
-                    app.refresh_lists()?;
-                    app.screen = Screen::Apps;
-                    app.status = "Enter/l launch · o settings · d remove · Esc back".into();
-                }
-                1 => {
-                    app.add_name.clear();
-                    app.add_exe.clear();
-                    app.add_id.clear();
-                    app.add_prefix = app.config.default_prefix.clone();
-                    app.add_proton = app.config.proton.default.clone();
-                    app.add_field = AddField::Name;
-                    app.screen = Screen::AddApp;
-                    app.status = "Tab fields · Enter save · Esc cancel".into();
-                }
-                2 => {
-                    app.refresh_lists()?;
-                    app.screen = Screen::Prefixes;
-                    app.status = "c create · s set default · Esc back".into();
-                }
-                3 => {
-                    app.refresh_lists()?;
-                    app.screen = Screen::Proton;
-                    app.refresh_lists()?;
-                    if let Some(i) = app.active_proton_index() {
-                        app.proton_sel = i;
-                    }
-                    app.status =
-                        "↑↓ move  Enter set default  [i] install  [m]/[t] prefer  [d] dwproton  [r]"
-                            .into();
-                }
-                4 => {
-                    app.launch_set_sel = 0;
-                    app.status =
-                        "Launch settings  ↑↓  Enter edit  Esc back (locale/graphics/log)"
-                            .into();
-                    app.screen = Screen::LaunchSettings;
-                }
-                5 => {
-                    app.refresh_doctor();
-                    app.screen = Screen::Doctor;
-                    app.status = "r refresh · Esc back".into();
-                }
-                6 => app.should_quit = true,
-                _ => {}
-            },
-            _ => {}
-        },
-        Screen::Apps => match code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                app.screen = Screen::Home;
-                app.status = "↑↓ move  Enter select  Esc back  q quit".into();
-            }
-            KeyCode::Up | KeyCode::Char('k') => select_prev(&mut app.apps_state, app.app_ids.len()),
-            KeyCode::Down | KeyCode::Char('j') => {
-                select_next(&mut app.apps_state, app.app_ids.len())
-            }
-            KeyCode::Enter | KeyCode::Char('l') => {
-                if let Some(i) = app.apps_state.selected() {
-                    if let Some(id) = app.app_ids.get(i).cloned() {
-                        let paths = app.paths.clone();
-                        let config = app.config.clone();
-                        let launch_res = suspend_tui_for_launch(|| {
-                            let db = AppsDb::load(&paths)?;
-                            let entry = db.get(&id)?;
-                            let spec = launch::LaunchSpec::from_app(&paths, &config, entry)?;
-                            let _ = launch::run_umu(&config, &spec)?;
-                            Ok(())
-                        });
-                        // Always full-redraw after suspend, including launch errors:
-                        // alt-screen was blanked regardless of whether the game ran.
-                        app.needs_full_redraw = true;
-                        match launch_res {
-                            Ok(()) => {
-                                app.status = format!("launched `{id}` (returned)");
+            } else {
+                match key.code {
+                    KeyCode::Char('q') | KeyCode::Esc => app.should_quit = true,
+                    KeyCode::Enter => match app.home_idx {
+                        0 => {
+                            app.refresh_lists()?;
+                            app.screen = Screen::Apps;
+                            app.status =
+                                "Enter/l launch · o/e settings · d remove · Esc · nav: jk/C-n C-p"
+                                    .into();
+                        }
+                        1 => {
+                            app.add_name.clear();
+                            app.add_exe.clear();
+                            app.add_id.clear();
+                            app.add_prefix = app.config.default_prefix.clone();
+                            app.add_proton = app.config.proton.default.clone();
+                            app.add_field = AddField::Name;
+                            app.screen = Screen::AddApp;
+                            app.status =
+                                "Tab/C-n C-p fields · Enter save · Esc cancel".into();
+                        }
+                        2 => {
+                            app.refresh_lists()?;
+                            app.screen = Screen::Prefixes;
+                            app.status = "c create · s set default · Esc · nav: jk/C-n C-p".into();
+                        }
+                        3 => {
+                            app.refresh_lists()?;
+                            app.screen = Screen::Proton;
+                            app.refresh_lists()?;
+                            if let Some(i) = app.active_proton_index() {
+                                app.proton_sel = i;
                             }
-                            Err(e) => {
-                                app.status = format!("launch `{id}` failed: {e}");
+                            app.status =
+                                "↑↓/jk/C-n  Enter set default  [i] install  [m]/[t] prefer  [d] [r]"
+                                    .into();
+                        }
+                        4 => {
+                            app.launch_set_sel = 0;
+                            app.status =
+                                "Launch settings  ↑↓/jk/C-n C-p  Enter edit  Esc back".into();
+                            app.screen = Screen::LaunchSettings;
+                        }
+                        5 => app.open_global_env_settings(),
+                        6 => {
+                            app.refresh_doctor();
+                            app.screen = Screen::Doctor;
+                            app.status = "r refresh · Esc back".into();
+                        }
+                        7 => app.should_quit = true,
+                        _ => {}
+                    },
+                    _ => {}
+                }
+            }
+        }
+        Screen::Apps => {
+            if is_nav_prev(key, NavMode::List) {
+                select_prev(&mut app.apps_state, app.app_ids.len());
+            } else if is_nav_next(key, NavMode::List) {
+                select_next(&mut app.apps_state, app.app_ids.len());
+            } else {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        app.screen = Screen::Home;
+                        app.status = "↑↓/jk/C-n C-p move  Enter select  Esc back  q quit".into();
+                    }
+                    KeyCode::Enter | KeyCode::Char('l') => {
+                        if let Some(i) = app.apps_state.selected() {
+                            if let Some(id) = app.app_ids.get(i).cloned() {
+                                let paths = app.paths.clone();
+                                let config = app.config.clone();
+                                let launch_res = suspend_tui_for_launch(|| {
+                                    let db = AppsDb::load(&paths)?;
+                                    let entry = db.get(&id)?;
+                                    let spec = launch::LaunchSpec::from_app(&paths, &config, entry)?;
+                                    let _ = launch::run_umu(&config, &spec)?;
+                                    Ok(())
+                                });
+                                // Always full-redraw after suspend, including launch errors:
+                                // alt-screen was blanked regardless of whether the game ran.
+                                app.needs_full_redraw = true;
+                                match launch_res {
+                                    Ok(()) => {
+                                        app.status = format!("launched `{id}` (returned)");
+                                    }
+                                    Err(e) => {
+                                        app.status = format!("launch `{id}` failed: {e}");
+                                    }
+                                }
                             }
                         }
                     }
-                }
-            }
-            KeyCode::Char('o') => app.open_app_settings()?,
-            KeyCode::Char('d') => {
-                if let Some(i) = app.apps_state.selected() {
-                    if let Some(id) = app.app_ids.get(i).cloned() {
-                        let mut db = AppsDb::load(&app.paths)?;
-                        let entry = db.remove(&id)?;
-                        db.save(&app.paths)?;
-                        if entry.desktop {
-                            let _ = desktop::uninstall_shortcut(&app.paths, &id);
+                    // `e` is an alias for settings (mnemonic: edit / env); same as `o`.
+                    KeyCode::Char('o') | KeyCode::Char('e') => app.open_app_settings()?,
+                    KeyCode::Char('d') => {
+                        if let Some(i) = app.apps_state.selected() {
+                            if let Some(id) = app.app_ids.get(i).cloned() {
+                                let mut db = AppsDb::load(&app.paths)?;
+                                let entry = db.remove(&id)?;
+                                db.save(&app.paths)?;
+                                if entry.desktop {
+                                    let _ = desktop::uninstall_shortcut(&app.paths, &id);
+                                }
+                                app.status = format!("removed app `{id}` (prefix kept)");
+                                app.refresh_lists()?;
+                            }
                         }
-                        app.status = format!("removed app `{id}` (prefix kept)");
+                    }
+                    KeyCode::Char('r') => {
                         app.refresh_lists()?;
+                        app.status = "apps refreshed".into();
                     }
+                    _ => {}
                 }
             }
-            KeyCode::Char('r') => {
-                app.refresh_lists()?;
-                app.status = "apps refreshed".into();
-            }
-            _ => {}
-        },
-        Screen::AddApp => match code {
-            KeyCode::Esc => {
-                app.screen = Screen::Home;
-                app.status = "↑↓ move  Enter select  Esc back  q quit".into();
-            }
-            KeyCode::Tab | KeyCode::Down => {
+        }
+        Screen::AddApp => {
+            // Form: Ctrl+n/p (and Tab/arrows) change fields; bare j/k type into the field.
+            if is_nav_next(key, NavMode::Form) {
                 app.add_field = match app.add_field {
                     AddField::Name => AddField::Exe,
                     AddField::Exe => AddField::Id,
@@ -919,8 +1267,7 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
                     AddField::Prefix => AddField::Proton,
                     AddField::Proton => AddField::Name,
                 };
-            }
-            KeyCode::BackTab | KeyCode::Up => {
+            } else if is_nav_prev(key, NavMode::Form) {
                 app.add_field = match app.add_field {
                     AddField::Name => AddField::Proton,
                     AddField::Exe => AddField::Name,
@@ -928,146 +1275,153 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
                     AddField::Prefix => AddField::Id,
                     AddField::Proton => AddField::Prefix,
                 };
-            }
-            KeyCode::Char(c) if !c.is_control() => {
-                field_mut(app).push(c);
-            }
-            KeyCode::Backspace => {
-                field_mut(app).pop();
-            }
-            KeyCode::Enter => save_new_app(app)?,
-            _ => {}
-        },
-        Screen::Prefixes => match code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                app.screen = Screen::Home;
-                app.status = "↑↓ move  Enter select  Esc back  q quit".into();
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                select_prev(&mut app.prefix_state, app.prefix_ids.len())
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                select_next(&mut app.prefix_state, app.prefix_ids.len())
-            }
-            KeyCode::Char('c') => {
-                let mut n = 1u32;
-                loop {
-                    let id = format!("pfx-{n}");
-                    if !app.prefix_ids.iter().any(|p| p == &id) {
-                        let path = app.paths.prefix_path(&id);
-                        launch::ensure_prefix(&path)?;
-                        app.status = format!("created {}", path.display());
-                        break;
+            } else {
+                match key.code {
+                    KeyCode::Esc => {
+                        app.screen = Screen::Home;
+                        app.status = "↑↓/jk/C-n C-p move  Enter select  Esc back  q quit".into();
                     }
-                    n += 1;
-                    if n > 999 {
-                        app.status = "too many auto prefixes".into();
-                        break;
+                    KeyCode::Char(c)
+                        if !c.is_control() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    {
+                        field_mut(app).push(c);
                     }
-                }
-                app.refresh_lists()?;
-            }
-            KeyCode::Char('s') => {
-                if let Some(i) = app.prefix_state.selected() {
-                    if let Some(id) = app.prefix_ids.get(i).cloned() {
-                        app.config.default_prefix = id.clone();
-                        app.config.save(&app.paths)?;
-                        app.status = format!("default_prefix = `{id}`");
+                    KeyCode::Backspace => {
+                        field_mut(app).pop();
                     }
+                    KeyCode::Enter => save_new_app(app)?,
+                    _ => {}
                 }
             }
-            KeyCode::Enter => {
-                if let Some(i) = app.prefix_state.selected() {
-                    if let Some(id) = app.prefix_ids.get(i) {
-                        let path = app.paths.prefix_path(id);
-                        app.status = format!("{id} → {}", path.display());
+        }
+        Screen::Prefixes => {
+            if is_nav_prev(key, NavMode::List) {
+                select_prev(&mut app.prefix_state, app.prefix_ids.len());
+            } else if is_nav_next(key, NavMode::List) {
+                select_next(&mut app.prefix_state, app.prefix_ids.len());
+            } else {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        app.screen = Screen::Home;
+                        app.status = "↑↓/jk/C-n C-p move  Enter select  Esc back  q quit".into();
                     }
-                }
-            }
-            KeyCode::Char('r') => {
-                app.refresh_lists()?;
-            }
-            _ => {}
-        },
-        Screen::Proton => match code {
-            KeyCode::Esc | KeyCode::Char('q') => {
-                app.screen = Screen::Home;
-                app.status = "↑↓ move  Enter select  Esc back  q quit".into();
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if !app.proton_installs.is_empty() {
-                    app.proton_sel = if app.proton_sel == 0 {
-                        app.proton_installs.len() - 1
-                    } else {
-                        app.proton_sel - 1
-                    };
-                }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if !app.proton_installs.is_empty() {
-                    app.proton_sel = (app.proton_sel + 1) % app.proton_installs.len();
-                }
-            }
-            // Primary action: pick the highlighted install as the global default.
-            KeyCode::Enter | KeyCode::Char(' ') => {
-                app.set_default_proton_from_sel()?;
-            }
-            KeyCode::Char('i') => {
-                let paths = app.paths.clone();
-                let install_res = suspend_tui_for_launch(|| {
-                    println!("Installing dwproton…");
-                    let path = proton::install_dwproton(&paths, None, false)?;
-                    println!("Installed: {}", path.display());
-                    Ok(())
-                });
-                app.needs_full_redraw = true;
-                match install_res {
-                    Ok(()) => {
+                    KeyCode::Char('c') => {
+                        let mut n = 1u32;
+                        loop {
+                            let id = format!("pfx-{n}");
+                            if !app.prefix_ids.iter().any(|p| p == &id) {
+                                let path = app.paths.prefix_path(&id);
+                                launch::ensure_prefix(&path)?;
+                                app.status = format!("created {}", path.display());
+                                break;
+                            }
+                            n += 1;
+                            if n > 999 {
+                                app.status = "too many auto prefixes".into();
+                                break;
+                            }
+                        }
                         app.refresh_lists()?;
-                        // Jump cursor to the newly preferred managed dwproton if present.
+                    }
+                    KeyCode::Char('s') => {
+                        if let Some(i) = app.prefix_state.selected() {
+                            if let Some(id) = app.prefix_ids.get(i).cloned() {
+                                app.config.default_prefix = id.clone();
+                                app.config.save(&app.paths)?;
+                                app.status = format!("default_prefix = `{id}`");
+                            }
+                        }
+                    }
+                    KeyCode::Enter => {
+                        if let Some(i) = app.prefix_state.selected() {
+                            if let Some(id) = app.prefix_ids.get(i) {
+                                let path = app.paths.prefix_path(id);
+                                app.status = format!("{id} → {}", path.display());
+                            }
+                        }
+                    }
+                    KeyCode::Char('r') => {
+                        app.refresh_lists()?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Screen::Proton => {
+            if is_nav_prev(key, NavMode::List) {
+                cycle_prev(&mut app.proton_sel, app.proton_installs.len());
+            } else if is_nav_next(key, NavMode::List) {
+                cycle_next(&mut app.proton_sel, app.proton_installs.len());
+            } else {
+                match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        app.screen = Screen::Home;
+                        app.status = "↑↓/jk/C-n C-p move  Enter select  Esc back  q quit".into();
+                    }
+                    // Primary action: pick the highlighted install as the global default.
+                    KeyCode::Enter | KeyCode::Char(' ') => {
+                        app.set_default_proton_from_sel()?;
+                    }
+                    KeyCode::Char('i') => {
+                        let paths = app.paths.clone();
+                        let install_res = suspend_tui_for_launch(|| {
+                            println!("Installing dwproton…");
+                            let path = proton::install_dwproton(&paths, None, false)?;
+                            println!("Installed: {}", path.display());
+                            Ok(())
+                        });
+                        app.needs_full_redraw = true;
+                        match install_res {
+                            Ok(()) => {
+                                app.refresh_lists()?;
+                                // Jump cursor to the newly preferred managed dwproton if present.
+                                if let Some(i) = app.active_proton_index() {
+                                    app.proton_sel = i;
+                                }
+                                app.status = "dwproton install finished".into();
+                            }
+                            Err(e) => {
+                                app.status = format!("dwproton install failed: {e}");
+                            }
+                        }
+                    }
+                    KeyCode::Char('m') => {
+                        app.config.proton.prefer = "managed".into();
+                        app.config.save(&app.paths)?;
+                        app.status =
+                            "prefer = managed (used when default is logical dwproton)".into();
+                    }
+                    KeyCode::Char('t') => {
+                        app.config.proton.prefer = "steam".into();
+                        app.config.save(&app.paths)?;
+                        app.status =
+                            "prefer = steam (used when default is logical dwproton)".into();
+                    }
+                    KeyCode::Char('d') => {
+                        // Logical alias: newest dwproton-* with prefer ranking.
+                        app.config.proton.default = "dwproton".into();
+                        app.config.proton.explicit_path = None;
+                        app.config.save(&app.paths)?;
                         if let Some(i) = app.active_proton_index() {
                             app.proton_sel = i;
                         }
-                        app.status = "dwproton install finished".into();
+                        app.status = "default proton = dwproton (latest matching prefer)".into();
                     }
-                    Err(e) => {
-                        app.status = format!("dwproton install failed: {e}");
+                    KeyCode::Char('r') => {
+                        app.refresh_lists()?;
+                        if let Some(i) = app.active_proton_index() {
+                            app.proton_sel = i;
+                        }
+                        app.status = "proton list refreshed".into();
                     }
+                    _ => {}
                 }
             }
-            KeyCode::Char('m') => {
-                app.config.proton.prefer = "managed".into();
-                app.config.save(&app.paths)?;
-                app.status = "prefer = managed (used when default is logical dwproton)".into();
-            }
-            KeyCode::Char('t') => {
-                app.config.proton.prefer = "steam".into();
-                app.config.save(&app.paths)?;
-                app.status = "prefer = steam (used when default is logical dwproton)".into();
-            }
-            KeyCode::Char('d') => {
-                // Logical alias: newest dwproton-* with prefer ranking.
-                app.config.proton.default = "dwproton".into();
-                app.config.proton.explicit_path = None;
-                app.config.save(&app.paths)?;
-                if let Some(i) = app.active_proton_index() {
-                    app.proton_sel = i;
-                }
-                app.status = "default proton = dwproton (latest matching prefer)".into();
-            }
-            KeyCode::Char('r') => {
-                app.refresh_lists()?;
-                if let Some(i) = app.active_proton_index() {
-                    app.proton_sel = i;
-                }
-                app.status = "proton list refreshed".into();
-            }
-            _ => {}
-        },
-        Screen::Doctor => match code {
+        }
+        Screen::Doctor => match key.code {
             KeyCode::Esc | KeyCode::Char('q') => {
                 app.screen = Screen::Home;
-                app.status = "↑↓ move  Enter select  Esc back  q quit".into();
+                app.status = "↑↓/jk/C-n C-p move  Enter select  Esc back  q quit".into();
             }
             KeyCode::Char('r') => {
                 app.refresh_doctor();
@@ -1079,7 +1433,54 @@ fn handle_key(app: &mut App, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
-fn handle_locale_key(app: &mut App, code: KeyCode) -> Result<()> {
+/// List/menu vs text-form field movement.
+///
+/// Forms keep bare `j`/`k` as typed characters; lists use them as vim motions.
+/// Both accept **Ctrl+n / Ctrl+p** (and Ctrl+j / Ctrl+k) so Register App never
+/// needs the arrow keys.
+#[derive(Clone, Copy)]
+enum NavMode {
+    List,
+    Form,
+}
+
+fn is_nav_next(key: KeyEvent, mode: NavMode) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Down => true,
+        KeyCode::Tab if matches!(mode, NavMode::Form) => true,
+        KeyCode::Char('n' | 'j') if ctrl => true,
+        KeyCode::Char('j') if matches!(mode, NavMode::List) && key.modifiers.is_empty() => true,
+        _ => false,
+    }
+}
+
+fn is_nav_prev(key: KeyEvent, mode: NavMode) -> bool {
+    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    match key.code {
+        KeyCode::Up => true,
+        KeyCode::BackTab if matches!(mode, NavMode::Form) => true,
+        KeyCode::Char('p' | 'k') if ctrl => true,
+        KeyCode::Char('k') if matches!(mode, NavMode::List) && key.modifiers.is_empty() => true,
+        _ => false,
+    }
+}
+
+fn cycle_prev(sel: &mut usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    *sel = if *sel == 0 { len - 1 } else { *sel - 1 };
+}
+
+fn cycle_next(sel: &mut usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    *sel = (*sel + 1) % len;
+}
+
+fn handle_locale_key(app: &mut App, key: KeyEvent) -> Result<()> {
     let first_run = app.screen == Screen::LocaleSetup;
     let per_app = app.screen == Screen::AppLocale;
     let n = if per_app {
@@ -1088,15 +1489,38 @@ fn handle_locale_key(app: &mut App, code: KeyCode) -> Result<()> {
         locale::selectable().len()
     };
 
-    match code {
+    if is_nav_prev(key, NavMode::List) {
+        if n > 0 {
+            let sel = if per_app {
+                &mut app.app_locale_sel
+            } else {
+                &mut app.locale_sel
+            };
+            cycle_prev(sel, n);
+        }
+        return Ok(());
+    }
+    if is_nav_next(key, NavMode::List) {
+        if n > 0 {
+            let sel = if per_app {
+                &mut app.app_locale_sel
+            } else {
+                &mut app.locale_sel
+            };
+            cycle_next(sel, n);
+        }
+        return Ok(());
+    }
+
+    match key.code {
         KeyCode::Esc if !first_run => {
             if per_app {
                 app.screen = Screen::AppSettings;
-                app.status = "↑↓ row  Enter edit  Esc back".into();
+                app.status = "↑↓/jk/C-n C-p row  Enter edit  Esc back".into();
             } else {
                 // Global locale picker is nested under Launch settings.
                 app.screen = Screen::LaunchSettings;
-                app.status = "Launch settings  ↑↓  Enter edit  Esc back".into();
+                app.status = "Launch settings  ↑↓/jk/C-n C-p  Enter edit  Esc back".into();
             }
         }
         KeyCode::Char('q') if first_run => {
@@ -1107,26 +1531,6 @@ fn handle_locale_key(app: &mut App, code: KeyCode) -> Result<()> {
         }
         KeyCode::Char('q') if per_app => {
             app.screen = Screen::AppSettings;
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            if n > 0 {
-                let sel = if per_app {
-                    &mut app.app_locale_sel
-                } else {
-                    &mut app.locale_sel
-                };
-                *sel = if *sel == 0 { n - 1 } else { *sel - 1 };
-            }
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            if n > 0 {
-                let sel = if per_app {
-                    &mut app.app_locale_sel
-                } else {
-                    &mut app.locale_sel
-                };
-                *sel = (*sel + 1) % n;
-            }
         }
         KeyCode::Enter => {
             if per_app {
@@ -1146,26 +1550,24 @@ fn handle_locale_key(app: &mut App, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
-fn handle_launch_settings_key(app: &mut App, code: KeyCode) -> Result<()> {
-    match code {
+fn handle_launch_settings_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if is_nav_prev(key, NavMode::List) {
+        cycle_prev(&mut app.launch_set_sel, LAUNCH_SET_LEN);
+        return Ok(());
+    }
+    if is_nav_next(key, NavMode::List) {
+        cycle_next(&mut app.launch_set_sel, LAUNCH_SET_LEN);
+        return Ok(());
+    }
+    match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.screen = Screen::Home;
-            app.status = "↑↓ move  Enter select  Esc back  q quit".into();
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            app.launch_set_sel = if app.launch_set_sel == 0 {
-                LAUNCH_SET_LEN - 1
-            } else {
-                app.launch_set_sel - 1
-            };
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.launch_set_sel = (app.launch_set_sel + 1) % LAUNCH_SET_LEN;
+            app.status = "↑↓/jk/C-n C-p move  Enter select  Esc back  q quit".into();
         }
         KeyCode::Enter | KeyCode::Char(' ') => match app.launch_set_sel {
             LAUNCH_SET_LOCALE => {
                 app.locale_sel = locale::selectable_index(app.config.locale.as_deref());
-                app.status = "Global default locale  ↑↓  Enter save  Esc back".into();
+                app.status = "Global default locale  ↑↓/jk/C-n C-p  Enter save  Esc back".into();
                 app.screen = Screen::Locale;
             }
             LAUNCH_SET_GRAPHICS => app.cycle_global_graphics()?,
@@ -1178,28 +1580,27 @@ fn handle_launch_settings_key(app: &mut App, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
-fn handle_app_settings_key(app: &mut App, code: KeyCode) -> Result<()> {
-    match code {
+fn handle_app_settings_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if is_nav_prev(key, NavMode::List) {
+        cycle_prev(&mut app.app_set_sel, APP_SET_LEN);
+        return Ok(());
+    }
+    if is_nav_next(key, NavMode::List) {
+        cycle_next(&mut app.app_set_sel, APP_SET_LEN);
+        return Ok(());
+    }
+    match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.app_settings_id = None;
             app.screen = Screen::Apps;
-            app.status = "Enter/l launch · o settings · d remove · Esc back".into();
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            app.app_set_sel = if app.app_set_sel == 0 {
-                APP_SET_LEN - 1
-            } else {
-                app.app_set_sel - 1
-            };
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.app_set_sel = (app.app_set_sel + 1) % APP_SET_LEN;
+            app.status = "Enter/l launch · o/e settings · d remove · Esc · nav: jk/C-n C-p".into();
         }
         KeyCode::Enter | KeyCode::Char(' ') => match app.app_set_sel {
+            APP_SET_NAME => app.open_app_name_edit(),
             APP_SET_EXE => app.open_exe_browse_mode(),
             APP_SET_LOCALE => {
                 let id = app.app_settings_id.as_deref().unwrap_or("?");
-                app.status = format!("locale for `{id}`  ↑↓  Enter save  Esc back");
+                app.status = format!("locale for `{id}`  ↑↓/jk/C-n C-p  Enter save  Esc back");
                 app.screen = Screen::AppLocale;
             }
             APP_SET_GRAPHICS => {
@@ -1207,6 +1608,7 @@ fn handle_app_settings_key(app: &mut App, code: KeyCode) -> Result<()> {
                 app.app_graphics_sel = (app.app_graphics_sel + 1) % 3;
                 app.apply_app_graphics()?;
             }
+            APP_SET_ENV => app.open_app_env_settings()?,
             _ => {}
         },
         _ => {}
@@ -1214,22 +1616,178 @@ fn handle_app_settings_key(app: &mut App, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
-fn handle_exe_browse_mode_key(app: &mut App, code: KeyCode) -> Result<()> {
-    match code {
-        KeyCode::Esc | KeyCode::Char('q') => {
+fn handle_app_name_edit_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    match key.code {
+        KeyCode::Esc => {
+            // Reload cached name from disk so cancel discards edits.
+            if let Some(id) = app.app_settings_id.as_deref() {
+                if let Ok(db) = AppsDb::load(&app.paths) {
+                    if let Ok(entry) = db.get(id) {
+                        app.app_settings_name = entry.name.clone();
+                    }
+                }
+            }
             let id = app.app_settings_id.as_deref().unwrap_or("?");
-            app.status = format!("settings for `{id}`  ↑↓  Enter edit  Esc back");
+            app.status = format!("settings for `{id}`  ↑↓/jk/C-n C-p  Enter edit  Esc back");
             app.screen = Screen::AppSettings;
         }
-        KeyCode::Up | KeyCode::Char('k') => {
-            app.exe_browse_mode_sel = if app.exe_browse_mode_sel == 0 {
-                EXE_MODE_LEN - 1
-            } else {
-                app.exe_browse_mode_sel - 1
-            };
+        KeyCode::Enter => app.apply_app_name()?,
+        KeyCode::Backspace => {
+            app.app_settings_name.pop();
         }
-        KeyCode::Down | KeyCode::Char('j') => {
-            app.exe_browse_mode_sel = (app.exe_browse_mode_sel + 1) % EXE_MODE_LEN;
+        KeyCode::Char(c)
+            if !c.is_control() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            app.app_settings_name.push(c);
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_env_settings_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let keys = app.env_keys_for_scope()?;
+    let n = keys.len();
+    if is_nav_prev(key, NavMode::List) {
+        if n > 0 {
+            cycle_prev(&mut app.env_sel, n);
+        }
+        return Ok(());
+    }
+    if is_nav_next(key, NavMode::List) {
+        if n > 0 {
+            cycle_next(&mut app.env_sel, n);
+        }
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            app.screen = Screen::Home;
+            app.status = "↑↓/jk/C-n C-p move  Enter select  Esc back  q quit".into();
+        }
+        KeyCode::Char('a') => {
+            app.env_scope = EnvScope::Global;
+            app.start_env_edit_new();
+        }
+        KeyCode::Char('r') => app.reset_global_env_defaults()?,
+        KeyCode::Char('d') => app.delete_env_at_selection()?,
+        KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('e') => {
+            if n == 0 {
+                app.env_scope = EnvScope::Global;
+                app.start_env_edit_new();
+            } else {
+                let i = app.env_sel.min(n - 1);
+                let key_name = keys[i].clone();
+                if let Some(val) = app.env_value_for_scope(&key_name)? {
+                    app.env_scope = EnvScope::Global;
+                    app.start_env_edit_existing(&key_name, &val);
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_app_env_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let keys = app.env_keys_for_scope()?;
+    // Rows: [mode] + keys when custom, or just [mode] when default.
+    let list_len = if app.app_use_custom_env {
+        1 + keys.len()
+    } else {
+        1
+    };
+    if is_nav_prev(key, NavMode::List) {
+        cycle_prev(&mut app.app_env_sel, list_len);
+        return Ok(());
+    }
+    if is_nav_next(key, NavMode::List) {
+        cycle_next(&mut app.app_env_sel, list_len);
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            let id = app.app_settings_id.as_deref().unwrap_or("?");
+            app.status = format!("settings for `{id}`  ↑↓/jk/C-n C-p  Enter edit  Esc back");
+            app.screen = Screen::AppSettings;
+        }
+        KeyCode::Char('a') => {
+            // Adding always switches to custom so the pair is applied at launch.
+            app.env_scope = EnvScope::App;
+            app.start_env_edit_new();
+        }
+        KeyCode::Char('d') => {
+            app.env_scope = EnvScope::App;
+            app.delete_env_at_selection()?;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('e') => {
+            if app.app_env_sel == APP_ENV_MODE_ROW {
+                app.toggle_app_custom_env()?;
+                // Leaving custom → clamp selection to mode row.
+                if !app.app_use_custom_env {
+                    app.app_env_sel = 0;
+                }
+            } else if app.app_use_custom_env {
+                let ki = app.app_env_sel - 1;
+                if let Some(key_name) = keys.get(ki).cloned() {
+                    if let Some(val) = app.env_value_for_scope(&key_name)? {
+                        app.env_scope = EnvScope::App;
+                        app.start_env_edit_existing(&key_name, &val);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_env_edit_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if is_nav_next(key, NavMode::Form) || is_nav_prev(key, NavMode::Form) {
+        app.env_edit_field = match app.env_edit_field {
+            EnvEditField::Key => EnvEditField::Value,
+            EnvEditField::Value => EnvEditField::Key,
+        };
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Esc => app.leave_env_edit(),
+        KeyCode::Enter => app.save_env_edit()?,
+        KeyCode::Backspace => match app.env_edit_field {
+            EnvEditField::Key => {
+                app.env_edit_key.pop();
+            }
+            EnvEditField::Value => {
+                app.env_edit_value.pop();
+            }
+        },
+        KeyCode::Char(c)
+            if !c.is_control() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+        {
+            match app.env_edit_field {
+                EnvEditField::Key => app.env_edit_key.push(c),
+                EnvEditField::Value => app.env_edit_value.push(c),
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_exe_browse_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    if is_nav_prev(key, NavMode::List) {
+        cycle_prev(&mut app.exe_browse_mode_sel, EXE_MODE_LEN);
+        return Ok(());
+    }
+    if is_nav_next(key, NavMode::List) {
+        cycle_next(&mut app.exe_browse_mode_sel, EXE_MODE_LEN);
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            let id = app.app_settings_id.as_deref().unwrap_or("?");
+            app.status = format!("settings for `{id}`  ↑↓/jk/C-n C-p  Enter edit  Esc back");
+            app.screen = Screen::AppSettings;
         }
         KeyCode::Enter | KeyCode::Char(' ') => match app.exe_browse_mode_sel {
             EXE_MODE_PREFIX => app.start_browse_prefix()?,
@@ -1241,18 +1799,19 @@ fn handle_exe_browse_mode_key(app: &mut App, code: KeyCode) -> Result<()> {
     Ok(())
 }
 
-fn handle_exe_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
-    match code {
+fn handle_exe_browser_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let len = app.browse_list_len();
+    if is_nav_prev(key, NavMode::List) {
+        select_prev(&mut app.browse_state, len);
+        return Ok(());
+    }
+    if is_nav_next(key, NavMode::List) {
+        select_next(&mut app.browse_state, len);
+        return Ok(());
+    }
+    match key.code {
         KeyCode::Esc | KeyCode::Char('q') => {
             app.open_exe_browse_mode();
-        }
-        KeyCode::Up | KeyCode::Char('k') => {
-            let len = app.browse_list_len();
-            select_prev(&mut app.browse_state, len);
-        }
-        KeyCode::Down | KeyCode::Char('j') => {
-            let len = app.browse_list_len();
-            select_next(&mut app.browse_state, len);
         }
         KeyCode::Enter | KeyCode::Char(' ') => {
             let Some(idx) = app.browse_state.selected() else {
@@ -1297,13 +1856,13 @@ fn handle_exe_browser_key(app: &mut App, code: KeyCode) -> Result<()> {
                 app.browse_cwd = home;
                 app.browse_state.select(Some(0));
                 app.reload_browse_entries()?;
-                app.status = "jumped to $HOME".into();
             }
         }
         _ => {}
     }
     Ok(())
 }
+
 
 enum BrowseAction {
     Up,
@@ -1312,12 +1871,20 @@ enum BrowseAction {
 }
 
 fn save_new_app(app: &mut App) -> Result<()> {
-    let name = app.add_name.trim().to_string();
     let exe = PathBuf::from(app.add_exe.trim());
-    if name.is_empty() || app.add_exe.trim().is_empty() {
-        app.status = "name and exe are required".into();
+    if app.add_exe.trim().is_empty() {
+        app.status = "exe is required".into();
         return Ok(());
     }
+    // Match CLI: empty name → stem of the exe (editable later in App settings).
+    let name = {
+        let n = app.add_name.trim();
+        if n.is_empty() {
+            crate::paths::name_from_exe(&exe)
+        } else {
+            n.to_string()
+        }
+    };
     let id = if app.add_id.trim().is_empty() {
         slugify(&name)
     } else {
@@ -1459,8 +2026,12 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         Screen::LocaleSetup => "Locale setup",
         Screen::Locale => "Locale (global)",
         Screen::LaunchSettings => "Launch settings",
+        Screen::EnvSettings => "Environment",
+        Screen::EnvEdit => "Edit env",
         Screen::AppLocale => "Locale (app)",
         Screen::AppSettings => "App settings",
+        Screen::AppNameEdit => "Edit name",
+        Screen::AppEnv => "App env",
         Screen::ExeBrowseMode => "Exe source",
         Screen::ExeBrowser => "Exe browser",
         Screen::Home => "Home",
@@ -1494,7 +2065,11 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             ui_locale_picker(f, app, chunks[1]);
         }
         Screen::LaunchSettings => ui_launch_settings(f, app, chunks[1]),
+        Screen::EnvSettings => ui_env_settings(f, app, chunks[1]),
+        Screen::EnvEdit => ui_env_edit(f, app, chunks[1]),
         Screen::AppSettings => ui_app_settings(f, app, chunks[1]),
+        Screen::AppNameEdit => ui_app_name_edit(f, app, chunks[1]),
+        Screen::AppEnv => ui_app_env(f, app, chunks[1]),
         Screen::ExeBrowseMode => ui_exe_browse_mode(f, app, chunks[1]),
         Screen::ExeBrowser => ui_exe_browser(f, app, chunks[1]),
         Screen::Home => {
@@ -1549,7 +2124,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 .collect();
             let list = List::new(items)
                 .block(block_main(
-                    "Apps  [Enter/l launch]  [o settings]  [d remove]  [r refresh]  [Esc]",
+                    "Apps  [Enter/l]  [o/e settings]  [d]  [r]  [jk/C-n C-p]  [Esc]",
                 ))
                 .highlight_style(s_sel())
                 .highlight_symbol("> ");
@@ -1590,7 +2165,11 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     s_dim(),
                 )),
                 Line::from(Span::styled(
-                    "Locale/graphics inherit global (Apps → o). Tab · Enter save · Esc",
+                    "Name empty → use exe file stem (same as CLI). Locale/graphics/env inherit global.",
+                    s_dim(),
+                )),
+                Line::from(Span::styled(
+                    "Field nav: Tab · ↑↓ · Ctrl+n/p · Ctrl+j/k  ·  Enter save · Esc",
                     s_hint(),
                 )),
             ];
@@ -1665,6 +2244,10 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         || app.status.contains("graphics =")
         || app.status.contains("sanitize_vulkan =")
         || app.status.contains("log_level =")
+        || app.status.contains("env mode =")
+        || app.status.contains("env `")
+        || app.status.contains("global env")
+        || app.status.contains("name →")
         || app.status.contains("default Proton")
         || app.status.contains("default proton")
         || app.status.contains("prefer =")
@@ -1948,7 +2531,7 @@ fn ui_launch_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
 
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
-            "Defaults applied to every launch. Per-app overrides: Apps → o.",
+            "Defaults applied to every launch. Per-app overrides: Apps → o/e. Env: Home → Environment.",
             s_dim(),
         )),
         Line::from(""),
@@ -1971,7 +2554,7 @@ fn ui_launch_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "↑↓ select · Enter cycle/edit · Esc back",
+        "↑↓ · j/k · Ctrl+n/p  ·  Enter cycle/edit · Esc back",
         s_hint(),
     )));
 
@@ -1981,8 +2564,277 @@ fn ui_launch_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(p, area);
 }
 
+fn ui_env_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            "Global defaults for every launch (config [launch.env]).",
+            s_dim(),
+        )),
+        Line::from(Span::styled(
+            "Built-ins: DXVK_HUD=0 · STEAMOS=1 · UMU_USE_STEAM=1  (r restores them)",
+            s_dim(),
+        )),
+        Line::from(Span::styled(
+            "Per-app custom env is layered on top (same keys override). Apps → o/e → Env.",
+            s_dim(),
+        )),
+        Line::from(""),
+    ];
+
+    let pairs: Vec<(String, String)> = app
+        .config
+        .launch
+        .env
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+
+    if pairs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "(empty — press a or Enter to add)",
+            s_warn(),
+        )));
+    } else {
+        for (i, (k, v)) in pairs.iter().enumerate() {
+            let selected = i == app.env_sel;
+            let mark = if selected { "> " } else { "  " };
+            let style = if selected {
+                s_sel()
+            } else {
+                Style::default().fg(Color::White)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("{mark}{k}={v}"),
+                style,
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓/jk/C-n C-p · Enter/e edit · a add · d delete · r reset · Esc home",
+        s_hint(),
+    )));
+
+    let p = Paragraph::new(lines)
+        .block(block_main("Environment variables (global)"))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
+fn ui_env_edit(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let scope = match app.env_scope {
+        EnvScope::Global => "global defaults",
+        EnvScope::App => "per-app custom (on top of defaults)",
+    };
+    let title = if app.env_edit_original_key.is_some() {
+        "Edit environment variable"
+    } else {
+        "Add environment variable"
+    };
+
+    let key_active = app.env_edit_field == EnvEditField::Key;
+    let val_active = app.env_edit_field == EnvEditField::Value;
+    let row = |active: bool, label: &str, value: &str| -> Line<'static> {
+        let mark = if active { ">" } else { " " };
+        let label_s = if active {
+            s_field_active()
+        } else {
+            s_field_idle()
+        };
+        let val_s = if active {
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        Line::from(vec![
+            Span::styled(format!("{mark} {label}: "), label_s),
+            Span::styled(value.to_string(), val_s),
+        ])
+    };
+
+    let lines = vec![
+        Line::from(Span::styled(format!("Scope: {scope}"), s_dim())),
+        Line::from(""),
+        row(key_active, "Key  ", &app.env_edit_key),
+        row(val_active, "Value", &app.env_edit_value),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Field nav: Tab · ↑↓ · Ctrl+n/p · Ctrl+j/k  ·  Enter save · Esc cancel",
+            s_hint(),
+        )),
+    ];
+
+    let p = Paragraph::new(lines)
+        .block(block_main(title))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
+fn ui_app_name_edit(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let id = app.app_settings_id.as_deref().unwrap_or("?");
+    let lines = vec![
+        Line::from(vec![
+            Span::styled("Display name for ", s_dim()),
+            Span::styled(id.to_string(), s_accent()),
+        ]),
+        Line::from(Span::styled(
+            "Shown in the app list and .desktop Name= field. Id is unchanged.",
+            s_dim(),
+        )),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled("> Name: ", s_field_active()),
+            Span::styled(
+                app.app_settings_name.clone(),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled("Enter save · Esc cancel", s_hint())),
+    ];
+    let p = Paragraph::new(lines)
+        .block(block_main("Edit app name"))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
+fn ui_app_env(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let id = app.app_settings_id.as_deref().unwrap_or("?");
+    let mode_label = if app.app_use_custom_env {
+        "Custom"
+    } else {
+        "Default"
+    };
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("Environment for ", s_dim()),
+            Span::styled(id.to_string(), s_accent()),
+        ]),
+        Line::from(Span::styled(
+            "Default = only global [launch.env].  Custom = global defaults + extras below.",
+            s_dim(),
+        )),
+        Line::from(Span::styled(
+            "Same keys in Custom override the global defaults.",
+            s_dim(),
+        )),
+        Line::from(""),
+    ];
+
+    // Mode row
+    let mode_sel = app.app_env_sel == APP_ENV_MODE_ROW;
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{}Mode       {mode_label}",
+            if mode_sel { "> " } else { "  " }
+        ),
+        if mode_sel {
+            s_sel()
+        } else {
+            Style::default().fg(Color::White)
+        },
+    )));
+    if mode_sel {
+        lines.push(Line::from(Span::styled(
+            "    Enter toggles Default ↔ Custom",
+            s_hint(),
+        )));
+    }
+
+    lines.push(Line::from(""));
+    if app.app_use_custom_env {
+        lines.push(Line::from(Span::styled(
+            "Custom extras (applied after defaults):",
+            s_title(),
+        )));
+        let pairs: Vec<(String, String)> = AppsDb::load(&app.paths)
+            .ok()
+            .and_then(|db| {
+                db.apps.get(id).map(|e| {
+                    e.env
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+
+        if pairs.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "  (none yet — press a to add)",
+                s_dim(),
+            )));
+        } else {
+            for (i, (k, v)) in pairs.iter().enumerate() {
+                let row_idx = i + 1; // after mode row
+                let selected = app.app_env_sel == row_idx;
+                let mark = if selected { "> " } else { "  " };
+                let style = if selected {
+                    s_sel()
+                } else {
+                    Style::default().fg(Color::White)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!("{mark}{k}={v}"),
+                    style,
+                )));
+            }
+        }
+
+        // Preview effective overrides against globals for selected extra? skip — keep UI simple.
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "Global defaults still applied:",
+            s_dim(),
+        )));
+        for (k, v) in &app.config.launch.env {
+            lines.push(Line::from(Span::styled(
+                format!("  {k}={v}"),
+                s_dim(),
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Using global defaults only:",
+            s_title(),
+        )));
+        if app.config.launch.env.is_empty() {
+            lines.push(Line::from(Span::styled("  (global env empty)", s_dim())));
+        } else {
+            for (k, v) in &app.config.launch.env {
+                lines.push(Line::from(Span::styled(
+                    format!("  {k}={v}"),
+                    s_dim(),
+                )));
+            }
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓/jk/C-n C-p · Enter toggle/edit · a add · d delete · Esc app settings",
+        s_hint(),
+    )));
+
+    let p = Paragraph::new(lines)
+        .block(block_main("App environment"))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
 fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let id = app.app_settings_id.as_deref().unwrap_or("?");
+    let name_disp = if app.app_settings_name.is_empty() {
+        "(empty)".to_string()
+    } else {
+        app.app_settings_name.clone()
+    };
     let exe_disp = if app.app_settings_exe.as_os_str().is_empty() {
         "(not set)".to_string()
     } else {
@@ -2002,11 +2854,22 @@ fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ),
         Some(g) => g.to_string(),
     };
+    let env_disp = if app.app_use_custom_env {
+        let n = AppsDb::load(&app.paths)
+            .ok()
+            .and_then(|db| db.apps.get(id).map(|e| e.env.len()))
+            .unwrap_or(0);
+        format!("custom (+{n} extras on defaults)")
+    } else {
+        "default (global [launch.env] only)".into()
+    };
 
-    let rows: [(&str, String); 3] = [
+    let rows: [(&str, String); 5] = [
+        ("Name", name_disp),
         ("Exe", exe_disp),
         ("Locale", loc),
         ("Graphics", gfx),
+        ("Env", env_disp),
     ];
 
     let mut lines: Vec<Line> = vec![
@@ -2015,7 +2878,11 @@ fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
             Span::styled(id.to_string(), s_accent()),
         ]),
         Line::from(Span::styled(
-            "Exe: after installers, point at the real game binary. Locale/graphics inherit global when unset.",
+            "Name: display label (id stays fixed). Exe: after installers, point at the real binary.",
+            s_dim(),
+        )),
+        Line::from(Span::styled(
+            "Env: Default = global only; Custom = defaults + extras (extras override).",
             s_dim(),
         )),
         Line::from(""),
@@ -2036,7 +2903,7 @@ fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Exe: Enter → browse (prefix or host) · Locale: picker · Graphics: cycle",
+        "Nav: ↑↓/jk/C-n C-p · Name: edit · Exe: browse · Locale · Graphics · Env",
         s_hint(),
     )));
     lines.push(Line::from(Span::styled("Esc back to Apps", s_hint())));

@@ -1,5 +1,6 @@
 //! Global config.toml loading and defaults.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 
@@ -7,6 +8,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
 use crate::paths::Paths;
+
+/// Built-in launch env applied when `[launch.env]` is absent from config.toml.
+///
+/// - `DXVK_HUD=0` — hide dwproton/DXVK "Compiling shaders..." (Proton setdefaults `compiler`)
+/// - `STEAMOS=1` / `UMU_USE_STEAM=1` — Steam Deck–like / Steam-runtime umu paths many titles expect
+pub fn builtin_launch_env() -> BTreeMap<String, String> {
+    let mut m = BTreeMap::new();
+    m.insert("DXVK_HUD".into(), "0".into());
+    m.insert("STEAMOS".into(), "1".into());
+    m.insert("UMU_USE_STEAM".into(), "1".into());
+    m
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -43,7 +56,7 @@ impl Default for Config {
 
 /// Global launch behaviour (Steam/Lutris-like defaults).
 ///
-/// Per-app overrides live on [`crate::apps::AppEntry`] (`locale`, `graphics`).
+/// Per-app overrides live on [`crate::apps::AppEntry`] (`locale`, `graphics`, env).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaunchConfig {
@@ -62,6 +75,12 @@ pub struct LaunchConfig {
     /// - `"normal"` — inherit streams (default; current pre-setting behaviour)
     /// - `"verbose"` — inherit + extra protoncli launch diagnostics
     pub log_level: String,
+    /// Default environment variables for every launch.
+    ///
+    /// Applied after locale / graphics env; per-app custom env can override keys.
+    /// Missing from config.toml → [`builtin_launch_env`]. Explicit empty table stays empty.
+    #[serde(default = "builtin_launch_env")]
+    pub env: BTreeMap<String, String>,
 }
 
 impl Default for LaunchConfig {
@@ -72,6 +91,7 @@ impl Default for LaunchConfig {
             // Default stays "noisy" so upgrades and first-time installs keep
             // failure output visible; quiet is an explicit player choice.
             log_level: "normal".into(),
+            env: builtin_launch_env(),
         }
     }
 }
@@ -257,6 +277,62 @@ categories = ["Game"]
         assert!(legacy.launch.sanitize_vulkan);
         assert_eq!(legacy.launch.graphics, "dxvk");
         assert_eq!(legacy.launch.log_level, "normal");
+        // Missing [launch.env] gets built-in defaults (DXVK_HUD / STEAMOS / …).
+        assert_eq!(legacy.launch.env.get("DXVK_HUD").map(String::as_str), Some("0"));
+        assert_eq!(legacy.launch.env.get("STEAMOS").map(String::as_str), Some("1"));
+        assert_eq!(
+            legacy.launch.env.get("UMU_USE_STEAM").map(String::as_str),
+            Some("1")
+        );
+    }
+
+    #[test]
+    fn launch_env_roundtrip_and_explicit_empty() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join(".protoncli");
+        let paths = Paths {
+            root: root.clone(),
+            config_dir: root.clone(),
+            data_dir: root.clone(),
+            config_file: root.join("config.toml"),
+            apps_file: root.join("apps.toml"),
+            prefixes_dir: root.join("prefixes"),
+            default_prefix: root.join("default"),
+            runtimes_dir: root.join("runtimes"),
+            icons_dir: root.join("icons"),
+            applications_dir: dir.path().join("applications"),
+        };
+        paths.ensure_dirs().unwrap();
+
+        let mut cfg = Config::default();
+        cfg.launch.env.insert("FOO".into(), "bar".into());
+        cfg.save(&paths).unwrap();
+        let loaded = Config::load(&paths).unwrap();
+        assert_eq!(loaded.launch.env.get("FOO").map(String::as_str), Some("bar"));
+        assert_eq!(loaded.launch.env.get("DXVK_HUD").map(String::as_str), Some("0"));
+
+        // Explicit empty [launch.env] must not resurrect built-ins.
+        fs::write(
+            &paths.config_file,
+            r#"
+default_prefix = "default"
+[proton]
+default = "dwproton"
+prefer = "managed"
+[umu]
+[desktop]
+create_on_add = true
+categories = ["Game"]
+[launch]
+sanitize_vulkan = true
+graphics = "dxvk"
+log_level = "normal"
+[launch.env]
+"#,
+        )
+        .unwrap();
+        let empty = Config::load(&paths).unwrap();
+        assert!(empty.launch.env.is_empty());
     }
 
     #[test]

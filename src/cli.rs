@@ -25,9 +25,9 @@ pub struct Cli {
 pub enum Commands {
     /// Register an application and optionally create a .desktop shortcut
     Add {
-        /// Display name
+        /// Display name (default: exe file stem, e.g. `Game.exe` → `Game`)
         #[arg(long)]
-        name: String,
+        name: Option<String>,
         /// Path to the Windows .exe
         #[arg(long)]
         exe: PathBuf,

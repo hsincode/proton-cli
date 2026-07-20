@@ -24,7 +24,7 @@ use crate::config::{
     is_valid_graphics, is_valid_log_level, normalize_graphics, normalize_log_level, Config,
 };
 use crate::error::Error;
-use crate::paths::{is_valid_app_id, slugify, Paths, DEFAULT_PREFIX_ID};
+use crate::paths::{is_valid_app_id, name_from_exe, slugify, Paths, DEFAULT_PREFIX_ID};
 
 fn main() -> ExitCode {
     match try_main() {
@@ -67,6 +67,8 @@ fn try_main() -> Result<ExitCode, Error> {
             locale,
             graphics,
         } => {
+            // `--name` optional: default to exe stem so `add --exe ./Game.exe` is enough.
+            let name = name.unwrap_or_else(|| name_from_exe(&exe));
             let id = id.unwrap_or_else(|| slugify(&name));
             if !is_valid_app_id(&id) {
                 return Err(Error::InvalidAppId(id));
@@ -112,11 +114,11 @@ fn try_main() -> Result<ExitCode, Error> {
 
             if create_desktop {
                 let desk = desktop::install_shortcut(&paths, &config.desktop, &id, &entry)?;
-                println!("registered `{id}`");
+                println!("registered `{id}` ({})", entry.name);
                 println!("  prefix : {}", paths.prefix_path(&prefix).display());
                 println!("  desktop: {}", desk.display());
             } else {
-                println!("registered `{id}` (no desktop shortcut)");
+                println!("registered `{id}` ({}) (no desktop shortcut)", entry.name);
                 println!("  prefix: {}", paths.prefix_path(&prefix).display());
             }
             if let Some(loc) = &entry.locale {

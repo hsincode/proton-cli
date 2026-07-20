@@ -137,14 +137,27 @@ impl LaunchSpec {
             sanitize_vulkan: config.launch.sanitize_vulkan,
             graphics: graphics.to_string(),
             log_level: log_level.to_string(),
-            // Locale + graphics, then per-app env wins on key collision.
+            // Locale → graphics → global [launch.env] → (optional) per-app env.
             env: merge_launch_env(
                 config,
                 entry.locale.as_deref(),
                 entry.graphics.as_deref(),
-                entry.env.iter().map(|(k, v)| (k.clone(), v.clone())),
+                app_env_extra(entry),
             ),
         })
+    }
+}
+
+/// Per-app custom env only when `use_custom_env`; otherwise empty (global defaults alone).
+pub fn app_env_extra(entry: &AppEntry) -> Vec<(String, String)> {
+    if entry.use_custom_env {
+        entry
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    } else {
+        Vec::new()
     }
 }
 
@@ -162,11 +175,13 @@ pub fn graphics_env(mode: &str) -> Vec<(String, String)> {
     }
 }
 
-/// Build launch env: locale → graphics → extra pairs (app or one-shot).
+/// Build launch env: locale → graphics → global `[launch.env]` → extra pairs.
 ///
 /// Locale: `app_locale` if set, else `config.locale`.
 /// Graphics: `app_graphics` if set, else `config.launch.graphics`.
-/// Extra env always overrides the same keys (raw `LANG` / `PROTON_USE_WINED3D` still wins).
+/// Global defaults: `config.launch.env` (built-ins include `DXVK_HUD=0`, `STEAMOS=1`, …).
+/// Extra env (per-app custom or CLI) always overrides the same keys
+/// (raw `LANG` / `PROTON_USE_WINED3D` / `DXVK_HUD` still win).
 pub fn merge_launch_env(
     config: &Config,
     app_locale: Option<&str>,
@@ -181,6 +196,9 @@ pub fn merge_launch_env(
     let gfx = effective_graphics(app_graphics, &config.launch.graphics);
     for (k, v) in graphics_env(gfx) {
         map.insert(k, v);
+    }
+    for (k, v) in &config.launch.env {
+        map.insert(k.clone(), v.clone());
     }
     for (k, v) in extra {
         map.insert(k, v);
@@ -211,6 +229,61 @@ mod tests {
         assert_eq!(get("LANG"), Some("C")); // raw env wins
         assert_eq!(get("LC_ALL"), Some("ja_JP.UTF-8"));
         assert_eq!(get("FOO"), Some("bar"));
+        // Built-in global defaults are present unless overridden.
+        assert_eq!(get("DXVK_HUD"), Some("0"));
+        assert_eq!(get("STEAMOS"), Some("1"));
+        assert_eq!(get("UMU_USE_STEAM"), Some("1"));
+    }
+
+    #[test]
+    fn custom_env_overrides_global_defaults() {
+        let mut cfg = Config::default();
+        cfg.launch.env.insert("DXVK_HUD".into(), "0".into());
+        let env = merge_launch_env(
+            &cfg,
+            None,
+            None,
+            [("DXVK_HUD".into(), "compiler".into())],
+        );
+        let get = |k: &str| {
+            env.iter()
+                .find(|(a, _)| a == k)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("DXVK_HUD"), Some("compiler"));
+        assert_eq!(get("STEAMOS"), Some("1"));
+    }
+
+    #[test]
+    fn app_env_extra_respects_use_custom_flag() {
+        use crate::apps::AppEntry;
+        use chrono::Utc;
+        use std::collections::BTreeMap;
+        use std::path::PathBuf;
+
+        let mut env = BTreeMap::new();
+        env.insert("FOO".into(), "bar".into());
+        let entry = AppEntry {
+            name: "t".into(),
+            exe: PathBuf::from("/tmp/x.exe"),
+            args: vec![],
+            cwd: None,
+            prefix: "default".into(),
+            proton: "dwproton".into(),
+            game_id: "umu-default".into(),
+            store: "none".into(),
+            locale: None,
+            graphics: None,
+            use_custom_env: false,
+            env: env.clone(),
+            icon: None,
+            desktop: false,
+            created_at: Utc::now(),
+        };
+        assert!(app_env_extra(&entry).is_empty());
+        let mut custom = entry;
+        custom.use_custom_env = true;
+        assert_eq!(app_env_extra(&custom), vec![("FOO".into(), "bar".into())]);
     }
 
     #[test]

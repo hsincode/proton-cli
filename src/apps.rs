@@ -38,7 +38,13 @@ pub struct AppEntry {
     /// Per-app D3D backend (`"dxvk"` / `"wined3d"`). `None` = `config.launch.graphics`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphics: Option<String>,
-    #[serde(default)]
+    /// When false (default), only global `[launch.env]` is applied; [`Self::env`] is ignored.
+    ///
+    /// When true, global defaults are applied first, then [`Self::env`] (same keys override).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub use_custom_env: bool,
+    /// Extra launch env when [`Self::use_custom_env`] is true (layered on global defaults).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub icon: Option<PathBuf>,
@@ -138,6 +144,7 @@ pub fn new_entry(
         store: store.unwrap_or_else(default_store),
         locale: None,
         graphics: None,
+        use_custom_env: false,
         env: BTreeMap::new(),
         icon: None,
         desktop,

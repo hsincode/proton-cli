@@ -168,6 +168,18 @@ pub fn slugify(name: &str) -> String {
     }
 }
 
+/// Display name from an exe path when the user omits `--name`.
+///
+/// `Game.exe` / `Game` → `"Game"`. Empty / odd paths fall back to `"app"`.
+pub fn name_from_exe(exe: &Path) -> String {
+    exe.file_stem()
+        .and_then(|s| s.to_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("app")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,6 +201,13 @@ mod tests {
     fn slugify_basic() {
         assert_eq!(slugify("My Cool Game!"), "my-cool-game");
         assert_eq!(slugify("  "), "app");
+    }
+
+    #[test]
+    fn name_from_exe_uses_stem() {
+        assert_eq!(name_from_exe(Path::new("/games/Cool Game.exe")), "Cool Game");
+        assert_eq!(name_from_exe(Path::new("foo.EXE")), "foo");
+        assert_eq!(name_from_exe(Path::new("/")), "app");
     }
 
     #[test]

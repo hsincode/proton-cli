@@ -105,6 +105,7 @@ mod tests {
             store: "none".into(),
             locale: None,
             graphics: None,
+            use_custom_env: false,
             env: BTreeMap::new(),
             icon: None,
             desktop: true,
