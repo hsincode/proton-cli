@@ -18,10 +18,17 @@ pub enum Error {
     #[error("exe not found: {0}")]
     ExeNotFound(PathBuf),
 
-    #[error("umu-run not found on PATH; install umu-launcher (see `proton-cli doctor`)")]
+    #[error(
+        "umu-run not found (optional when Steam is installed; see `proton-cli doctor`)"
+    )]
     UmuNotFound,
 
-    #[error("no Proton runtime found; run `proton-cli proton install`")]
+    #[error(
+        "no launch backend: install Steam (with SteamLinuxRuntime + Proton) or umu-launcher; see `proton-cli doctor`"
+    )]
+    NoLaunchBackend,
+
+    #[error("no Proton runtime found; install Steam Proton / dwproton or run `proton-cli proton install`")]
     ProtonNotFound,
 
     #[error("Proton path does not look like a valid Proton install: {0}")]

@@ -9,6 +9,7 @@ mod error;
 mod launch;
 mod paths;
 mod proton;
+mod steam;
 mod tui;
 
 use std::process::ExitCode;
@@ -273,12 +274,19 @@ fn try_main() -> Result<ExitCode, Error> {
             let report = doctor::run_doctor(&paths, &config);
             doctor::print_report(&report);
             println!(
-                "default WINEPREFIX: {} (id=`{}`)",
+                "default prefix (STEAM_COMPAT_DATA_PATH): {} (id=`{}`)",
                 paths.prefix_path(&config.default_prefix).display(),
                 config.default_prefix
             );
-            let ok = matches!(report.umu, doctor::UmuStatus::Found(_))
-                && report.default_proton.is_some();
+            println!(
+                "  wine pfx: {}",
+                paths
+                    .prefix_path(&config.default_prefix)
+                    .join("pfx")
+                    .display()
+            );
+            // Healthy if we can launch (umu or Steam) and have a Proton.
+            let ok = report.backend.is_some() && report.default_proton.is_some();
             Ok(if ok {
                 ExitCode::SUCCESS
             } else {

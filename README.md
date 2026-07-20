@@ -11,31 +11,36 @@ Linux 上で Windows のゲーム・アプリを起動するための **CLI + �
 
 `proton-cli` 単体ではゲームは起動しません。次を揃えてください。
 
-### 必須
+### 必須（どちらかの経路）
 
-| もの | 役割 | 導入方法の例 |
-|------|------|----------------|
-| **Linux（x86_64）** | 実行環境 | ディストロ本体 |
-| **GPU ドライバ**（Vulkan） | Proton / DXVK が前提 | NVIDIA / AMD / Intel の公式またはディストロの Vulkan 対応ドライバ |
-| **[umu-launcher](https://github.com/Open-Wine-Components/umu-launcher)**（`umu-run`） | Steam 同等のランタイム上で Proton を起動 | 下記「umu の入れ方」 |
-| **Proton 本体**（dwproton など） | Windows 互換レイヤ | `proton-cli proton install`（推奨）または Steam 経由で入れた Proton を検出 |
+**経路 A — Steam だけ（推奨しやすい）**
+
+| もの | 役割 |
+|------|------|
+| **Steam** | クライアント + ライブラリ |
+| **Steam Linux Runtime**（sniper 等） | コンテナ起動（Steam が Proton 用に入れる） |
+| **Proton**（Steam 同梱 / GE / dwproton） | Windows 互換 |
+| **GPU ドライバ**（Vulkan） | DXVK / 描画 |
+
+`umu-run` は **不要** です。Steam は `umu-run` を同梱しませんが、proton-cli は  
+`SteamLinuxRuntime + proton` で Steam と同じ系統の起動ができます。
+
+**経路 B — umu-launcher（Steam なしでも可）**
+
+| もの | 役割 |
+|------|------|
+| **[umu-launcher](https://github.com/Open-Wine-Components/umu-launcher)**（`umu-run`） | Steam 外向けの統合ランチャ |
+| **Proton** | `proton-cli proton install` または既存ビルド |
+| **GPU ドライバ**（Vulkan） | 同上 |
 
 ```bash
-# umu-launcher の例
-# Arch
-pacman -S umu-launcher
-
-# Fedora
-dnf install umu-launcher
-
-# パッケージが無い場合
-# https://github.com/Open-Wine-Components/umu-launcher のリリース / ビルド手順を参照
-```
-
-```bash
-# Proton（dwproton）— proton-cli から取得（Steam 不要）
+# 経路 B の例
+# Arch:   pacman -S umu-launcher
+# Fedora: dnf install umu-launcher
 proton-cli proton install
 ```
+
+起動時の優先順位: **umu-run があれば umu** → なければ **Steam 経路**。
 
 ### ビルド / インストール時に必要（開発・cargo 利用者）
 
@@ -44,21 +49,21 @@ proton-cli proton install
 | **Rust / cargo**（MSRV 1.80 目安） | `cargo install` やソースビルド |
 | ネットワーク | dwproton のダウンロード、crates 取得 |
 
-### 任意だがよく使うもの
+### 任意
 
-| もの | いつ必要か | 備考 |
-|------|------------|------|
-| **[Steam](https://store.steampowered.com/about/)** | `prefer = "steam"` で Steam 配下の Proton を使う / 既に Steam に入れた GE-Proton・dwproton を流用する | **起動そのものには必須ではない**。`proton-cli proton install` で managed に入れれば Steam なしでも可 |
-| **Steam Linux Runtime** | umu が内部で取得・利用 | 通常は umu が面倒を見る。手動で Steam を入れる必要はないことが多い |
-| **デスクトップ環境** | アプリメニューに `.desktop` を出したいとき | `~/.local/share/applications/` に作成 |
-| **winetricks / protontricks** | 依存 DLL・VC++ などを prefix に入れたいとき | 現状 CLI ラッパーは未実装（手動利用可） |
-| **Gamescope** | フルスクリーン・スケール調整など | 任意。env で渡す運用 |
+| もの | いつ必要か |
+|------|------------|
+| **umu-launcher** | Steam を使わず経路 B で起動したい / Lutris と同じ umu 経路を優先したい |
+| **デスクトップ環境** | アプリメニューに `.desktop` を出したい |
+| **winetricks / protontricks** | 依存 DLL 整備（手動） |
+| **Gamescope** | フルスクリーン等 |
 
-### 明示: Steam は必須ではない
+### よくある誤解
 
-- **ゲーム起動に Steam クライアントは不要**（umu + Proton があれば足りる）。
-- Steam を入れると、`~/.steam/steam/compatibilitytools.d` などに入れた **GE-Proton / dwproton を自動検出**できる。
-- Steam ゲーム本体の起動・Steamworks・一部の anti-cheat は **Steam 側**の話であり、本ツールのスコープ外。
+- **Steam が入っていても `umu-run` は出てきません。** Steam ≠ umu。  
+  proton-cli 0.1.1+ は Steam 経路にフォールバックするので、`umu-run not found` でも起動できます。
+- Steam の Proton / dwproton / GE-Proton は自動検出します。
+- Steam ストアのゲーム起動や anti-cheat は本ツールの対象外です。
 
 ---
 
@@ -239,23 +244,20 @@ proton-cli launch <id>
 
 ## 依存関係まとめ（チェックリスト）
 
-導入順の目安:
+導入順の目安（Steam 利用者）:
 
-1. **GPU ドライバ（Vulkan）** … ディストロ / ベンダー手順
-2. **umu-launcher** … パッケージまたは upstream
-3. **proton-cli** … `cargo install` など
-4. **Proton（dwproton）** … `proton-cli proton install`  
-   - または **Steam をインストール**し、Steam の互換ツールとして Proton / dwproton を入れる
-5. `proton-cli doctor` で **umu-run OK** と **PROTONPATH** を確認
-6. アプリを `add` して `launch`
+1. **GPU ドライバ（Vulkan）**
+2. **Steam** を入れ、Proton と Steam Linux Runtime を用意（通常は Steam が自動）
+3. **proton-cli** … `cargo install protoncli`
+4. `proton-cli doctor` で **backend=steam** と **PROTONPATH** を確認
+5. `add` → `launch`
 
 | チェック | 必須? |
 |----------|--------|
-| umu-launcher | **必須**（起動時） |
-| Proton（dwproton 等） | **必須**（起動時） |
-| Steam | **任意**（Proton 流用・`prefer=steam` 時） |
-| アプリメニュー用 DE | 任意 |
-| winetricks 等 | 任意 |
+| Steam **または** umu-launcher | **どちらか必須** |
+| Proton | **必須** |
+| SteamLinuxRuntime | Steam 経路では **強く推奨**（無いと bare proton） |
+| umu-run | 任意（あれば優先） |
 
 ### crates.io パッケージ名
 

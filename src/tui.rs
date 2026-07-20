@@ -169,11 +169,38 @@ impl App {
         ));
         match &report.umu {
             doctor::UmuStatus::Found(p) => lines.push(format!("umu-run   : OK ({})", p.display())),
-            doctor::UmuStatus::Missing => lines.push("umu-run   : MISSING".into()),
+            doctor::UmuStatus::Missing => {
+                lines.push("umu-run   : missing (optional if Steam ready)".into())
+            }
+        }
+        match &report.steam {
+            doctor::SteamStatus::Ready {
+                client,
+                runtime,
+                container,
+            } => lines.push(format!(
+                "Steam     : OK {} / {} (container={})",
+                client.display(),
+                runtime,
+                container
+            )),
+            doctor::SteamStatus::ClientOnly { client } => {
+                lines.push(format!("Steam     : client only ({})", client.display()))
+            }
+            doctor::SteamStatus::Missing => lines.push("Steam     : missing".into()),
+        }
+        match &report.backend {
+            Some(crate::launch::LaunchBackend::Umu { .. }) => {
+                lines.push("backend   : umu".into())
+            }
+            Some(crate::launch::LaunchBackend::Steam { use_container, .. }) => {
+                lines.push(format!("backend   : steam (container={use_container})"))
+            }
+            None => lines.push("backend   : NONE".into()),
         }
         match &report.default_proton {
             Some(p) => lines.push(format!("PROTONPATH: {}", p.display())),
-            None => lines.push("PROTONPATH: unresolved — install dwproton".into()),
+            None => lines.push("PROTONPATH: unresolved — install dwproton / Steam Proton".into()),
         }
         lines.push(format!(
             "prefer    : {} / default={}",
