@@ -1,12 +1,14 @@
 //! proton-cli — CLI launcher for Windows games via umu + Proton.
 
 mod apps;
+mod browse;
 mod cli;
 mod config;
 mod desktop;
 mod doctor;
 mod error;
 mod launch;
+mod locale;
 mod paths;
 mod proton;
 mod steam;
@@ -18,7 +20,9 @@ use clap::Parser;
 
 use crate::apps::{new_entry, AppsDb};
 use crate::cli::{Cli, Commands, DesktopCmd, PrefixCmd, ProtonCmd};
-use crate::config::Config;
+use crate::config::{
+    is_valid_graphics, is_valid_log_level, normalize_graphics, normalize_log_level, Config,
+};
 use crate::error::Error;
 use crate::paths::{is_valid_app_id, slugify, Paths, DEFAULT_PREFIX_ID};
 
@@ -60,10 +64,22 @@ fn try_main() -> Result<ExitCode, Error> {
             game_id,
             store,
             no_desktop,
+            locale,
+            graphics,
         } => {
             let id = id.unwrap_or_else(|| slugify(&name));
             if !is_valid_app_id(&id) {
                 return Err(Error::InvalidAppId(id));
+            }
+            if let Some(ref loc) = locale {
+                if locale::find(loc).is_none() {
+                    return Err(Error::UnknownLocale(loc.clone()));
+                }
+            }
+            if let Some(ref gfx) = graphics {
+                if !is_valid_graphics(gfx) {
+                    return Err(Error::UnknownGraphics(gfx.clone()));
+                }
             }
             // Default wineprefix is ~/.protoncli/default (id "default"), not per-app.
             let prefix = prefix.unwrap_or_else(|| config.default_prefix.clone());
@@ -74,7 +90,7 @@ fn try_main() -> Result<ExitCode, Error> {
                 return Err(Error::InvalidAppId(prefix));
             }
             let create_desktop = !no_desktop && config.desktop.create_on_add;
-            let entry = new_entry(
+            let mut entry = new_entry(
                 name,
                 exe,
                 args,
@@ -85,6 +101,8 @@ fn try_main() -> Result<ExitCode, Error> {
                 store,
                 create_desktop,
             )?;
+            entry.locale = locale;
+            entry.graphics = graphics;
 
             let mut db = AppsDb::load(&paths)?;
             db.insert(id.clone(), entry.clone())?;
@@ -100,6 +118,12 @@ fn try_main() -> Result<ExitCode, Error> {
             } else {
                 println!("registered `{id}` (no desktop shortcut)");
                 println!("  prefix: {}", paths.prefix_path(&prefix).display());
+            }
+            if let Some(loc) = &entry.locale {
+                println!("  locale  : {loc} (per-app)");
+            }
+            if let Some(gfx) = &entry.graphics {
+                println!("  graphics: {gfx} (per-app)");
             }
             Ok(ExitCode::SUCCESS)
         }
@@ -119,7 +143,26 @@ fn try_main() -> Result<ExitCode, Error> {
             proton,
             game_id,
             cwd,
+            locale,
+            graphics,
+            log_level,
+            no_sanitize_vulkan,
         } => {
+            if let Some(ref loc) = locale {
+                if locale::find(loc).is_none() {
+                    return Err(Error::UnknownLocale(loc.clone()));
+                }
+            }
+            if let Some(ref gfx) = graphics {
+                if !is_valid_graphics(gfx) {
+                    return Err(Error::UnknownGraphics(gfx.clone()));
+                }
+            }
+            if let Some(ref level) = log_level {
+                if !is_valid_log_level(level) {
+                    return Err(Error::UnknownLogLevel(level.clone()));
+                }
+            }
             let prefix_id = prefix.unwrap_or_else(|| config.default_prefix.clone());
             let prefix_path = paths.prefix_path(&prefix_id);
             let proton_path = proton::resolve_proton_path(&paths, &config.proton, &proton)?;
@@ -129,6 +172,16 @@ fn try_main() -> Result<ExitCode, Error> {
                 std::env::current_dir()?.join(exe)
             };
             let cwd = cwd.or_else(|| exe.parent().map(|p| p.to_path_buf()));
+            let gfx = launch::effective_graphics(
+                graphics.as_deref(),
+                &config.launch.graphics,
+            );
+            let level = normalize_log_level(
+                log_level
+                    .as_deref()
+                    .unwrap_or(&config.launch.log_level),
+            );
+            let sanitize_vulkan = config.launch.sanitize_vulkan && !no_sanitize_vulkan;
             let spec = launch::LaunchSpec {
                 exe,
                 args,
@@ -137,7 +190,15 @@ fn try_main() -> Result<ExitCode, Error> {
                 proton_path,
                 game_id,
                 store: "none".into(),
-                env: vec![],
+                sanitize_vulkan,
+                graphics: gfx.to_string(),
+                log_level: level.to_string(),
+                env: launch::merge_launch_env(
+                    &config,
+                    locale.as_deref(),
+                    graphics.as_deref(),
+                    std::iter::empty(),
+                ),
             };
             let status = launch::run_umu(&config, &spec)?;
             Ok(status_to_code(status))
@@ -148,13 +209,18 @@ fn try_main() -> Result<ExitCode, Error> {
             if db.apps.is_empty() {
                 println!("(no apps registered)");
             } else {
-                println!("{:<20} {:<20} {:<12} {}", "ID", "NAME", "PREFIX", "EXE");
+                println!(
+                    "{:<18} {:<18} {:<10} {:<8} {}",
+                    "ID", "NAME", "PREFIX", "LOCALE", "EXE"
+                );
                 for (id, e) in &db.apps {
+                    let loc = e.locale.as_deref().unwrap_or("-");
                     println!(
-                        "{:<20} {:<20} {:<12} {}",
+                        "{:<18} {:<18} {:<10} {:<8} {}",
                         id,
                         e.name,
                         e.prefix,
+                        loc,
                         e.exe.display()
                     );
                 }
@@ -273,6 +339,26 @@ fn try_main() -> Result<ExitCode, Error> {
         Commands::Doctor => {
             let report = doctor::run_doctor(&paths, &config);
             doctor::print_report(&report);
+            match config.locale.as_deref().and_then(locale::find) {
+                Some(l) => println!("locale     : {} ({})", l.id, l.posix),
+                None => println!("locale     : (not set — run `proton-cli` TUI to choose)"),
+            }
+            println!(
+                "graphics   : {} (config.launch.graphics)",
+                normalize_graphics(&config.launch.graphics)
+            );
+            println!(
+                "sanitize_vulkan: {} (strip host VK_ICD_FILENAMES like Steam/Lutris)",
+                if config.launch.sanitize_vulkan {
+                    "ON"
+                } else {
+                    "OFF"
+                }
+            );
+            println!(
+                "log_level  : {} (quiet hides umu/Proton/Wine terminal output)",
+                normalize_log_level(&config.launch.log_level)
+            );
             println!(
                 "default prefix (STEAM_COMPAT_DATA_PATH): {} (id=`{}`)",
                 paths.prefix_path(&config.default_prefix).display(),
@@ -302,9 +388,23 @@ fn try_main() -> Result<ExitCode, Error> {
             println!("exe    : {}", entry.exe.display());
             println!("prefix : {}", paths.prefix_path(&entry.prefix).display());
             println!("desktop: {}", paths.desktop_file(&id).display());
+            match entry.locale.as_deref() {
+                Some(l) => println!("locale  : {l} (per-app)"),
+                None => match config.locale.as_deref() {
+                    Some(g) => println!("locale  : (inherit global `{g}`)"),
+                    None => println!("locale  : (inherit global; global not set)"),
+                },
+            }
+            match entry.graphics.as_deref() {
+                Some(g) => println!("graphics: {g} (per-app)"),
+                None => println!(
+                    "graphics: (inherit global `{}`)",
+                    normalize_graphics(&config.launch.graphics)
+                ),
+            }
             match proton::resolve_proton_path(&paths, &config.proton, &entry.proton) {
-                Ok(p) => println!("proton : {}", p.display()),
-                Err(_) => println!("proton : (unresolved: {})", entry.proton),
+                Ok(p) => println!("proton  : {}", p.display()),
+                Err(_) => println!("proton  : (unresolved: {})", entry.proton),
             }
             Ok(ExitCode::SUCCESS)
         }

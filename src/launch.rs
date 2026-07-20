@@ -5,16 +5,23 @@
 //! 2. Steam Linux Runtime + Proton (no separate umu package needed if Steam is installed)
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::{Command, ExitStatus, Stdio};
 
 use which::which;
 
 use crate::apps::AppEntry;
-use crate::config::{Config, UmuConfig};
+use crate::config::{self, Config, UmuConfig};
 use crate::error::{Error, Result};
+use crate::locale;
 use crate::paths::Paths;
 use crate::proton;
 use crate::steam::{self, SteamLayout};
+
+/// Host env keys that pin Vulkan ICDs. Session configs sometimes set only the
+/// x86_64 ICD (`VK_ICD_FILENAMES=…/radeon_icd.x86_64.json`), which makes
+/// **32-bit** DXVK fail with `DxvkInstance::createInstance`. Steam and Lutris
+/// do not inherit that pin into the game process; we strip them by default.
+pub const HOST_VULKAN_ICD_KEYS: &[&str] = &["VK_ICD_FILENAMES", "VK_DRIVER_FILES"];
 
 /// How a game will be started.
 #[derive(Debug, Clone)]
@@ -104,6 +111,12 @@ pub struct LaunchSpec {
     pub proton_path: PathBuf,
     pub game_id: String,
     pub store: String,
+    /// When true, strip host Vulkan ICD pins before applying [`Self::env`].
+    pub sanitize_vulkan: bool,
+    /// Effective graphics backend id (`dxvk` / `wined3d`) for logs / doctor.
+    pub graphics: String,
+    /// Effective terminal log level (`quiet` / `normal` / `verbose`).
+    pub log_level: String,
     pub env: Vec<(String, String)>,
 }
 
@@ -111,6 +124,8 @@ impl LaunchSpec {
     pub fn from_app(paths: &Paths, config: &Config, entry: &AppEntry) -> Result<Self> {
         let prefix = paths.prefix_path(&entry.prefix);
         let proton_path = proton::resolve_proton_path(paths, &config.proton, &entry.proton)?;
+        let graphics = effective_graphics(entry.graphics.as_deref(), &config.launch.graphics);
+        let log_level = config::normalize_log_level(&config.launch.log_level);
         Ok(Self {
             exe: entry.exe.clone(),
             args: entry.args.clone(),
@@ -119,12 +134,115 @@ impl LaunchSpec {
             proton_path,
             game_id: entry.game_id.clone(),
             store: entry.store.clone(),
-            env: entry
-                .env
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect(),
+            sanitize_vulkan: config.launch.sanitize_vulkan,
+            graphics: graphics.to_string(),
+            log_level: log_level.to_string(),
+            // Locale + graphics, then per-app env wins on key collision.
+            env: merge_launch_env(
+                config,
+                entry.locale.as_deref(),
+                entry.graphics.as_deref(),
+                entry.env.iter().map(|(k, v)| (k.clone(), v.clone())),
+            ),
         })
+    }
+}
+
+/// Resolve graphics: per-app override, else global `config.launch.graphics`.
+pub fn effective_graphics<'a>(app: Option<&'a str>, global: &'a str) -> &'a str {
+    let raw = app.unwrap_or(global);
+    config::normalize_graphics(raw)
+}
+
+/// Env pairs for a graphics backend (`PROTON_USE_WINED3D` only for wined3d).
+pub fn graphics_env(mode: &str) -> Vec<(String, String)> {
+    match config::normalize_graphics(mode) {
+        "wined3d" => vec![("PROTON_USE_WINED3D".into(), "1".into())],
+        _ => Vec::new(),
+    }
+}
+
+/// Build launch env: locale → graphics → extra pairs (app or one-shot).
+///
+/// Locale: `app_locale` if set, else `config.locale`.
+/// Graphics: `app_graphics` if set, else `config.launch.graphics`.
+/// Extra env always overrides the same keys (raw `LANG` / `PROTON_USE_WINED3D` still wins).
+pub fn merge_launch_env(
+    config: &Config,
+    app_locale: Option<&str>,
+    app_graphics: Option<&str>,
+    extra: impl IntoIterator<Item = (String, String)>,
+) -> Vec<(String, String)> {
+    let mut map = std::collections::BTreeMap::new();
+    let effective_loc = locale::effective_id(app_locale, config.locale.as_deref());
+    for (k, v) in locale::env_for_id(effective_loc) {
+        map.insert(k, v);
+    }
+    let gfx = effective_graphics(app_graphics, &config.launch.graphics);
+    for (k, v) in graphics_env(gfx) {
+        map.insert(k, v);
+    }
+    for (k, v) in extra {
+        map.insert(k, v);
+    }
+    map.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+
+    #[test]
+    fn merge_locale_then_app_override() {
+        let mut cfg = Config::default();
+        cfg.locale = Some("ja".into());
+        let env = merge_launch_env(
+            &cfg,
+            None,
+            None,
+            [("LANG".into(), "C".into()), ("FOO".into(), "bar".into())],
+        );
+        let get = |k: &str| {
+            env.iter()
+                .find(|(a, _)| a == k)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("LANG"), Some("C")); // raw env wins
+        assert_eq!(get("LC_ALL"), Some("ja_JP.UTF-8"));
+        assert_eq!(get("FOO"), Some("bar"));
+    }
+
+    #[test]
+    fn app_locale_overrides_global() {
+        let mut cfg = Config::default();
+        cfg.locale = Some("ja".into());
+        let env = merge_launch_env(&cfg, Some("en"), None, std::iter::empty());
+        let get = |k: &str| {
+            env.iter()
+                .find(|(a, _)| a == k)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(get("LANG"), Some("en_US.UTF-8"));
+        assert_eq!(get("LC_ALL"), Some("en_US.UTF-8"));
+    }
+
+    #[test]
+    fn wined3d_sets_proton_flag() {
+        let mut cfg = Config::default();
+        cfg.launch.graphics = "dxvk".into();
+        let env = merge_launch_env(&cfg, None, Some("wined3d"), std::iter::empty());
+        assert!(env
+            .iter()
+            .any(|(k, v)| k == "PROTON_USE_WINED3D" && v == "1"));
+        let env_dxvk = merge_launch_env(&cfg, None, None, std::iter::empty());
+        assert!(!env_dxvk.iter().any(|(k, _)| k == "PROTON_USE_WINED3D"));
+    }
+
+    #[test]
+    fn host_vulkan_icd_keys_documented() {
+        assert!(HOST_VULKAN_ICD_KEYS.contains(&"VK_ICD_FILENAMES"));
+        assert!(HOST_VULKAN_ICD_KEYS.contains(&"VK_DRIVER_FILES"));
     }
 }
 
@@ -156,11 +274,41 @@ pub fn run_game(config: &Config, spec: &LaunchSpec) -> Result<ExitStatus> {
 }
 
 fn apply_common_env(cmd: &mut Command, spec: &LaunchSpec) {
+    // Always clear host PROTON_USE_WINED3D so `spec.env` (from graphics mode)
+    // is authoritative; re-set below if graphics/env asks for wined3d.
+    cmd.env_remove("PROTON_USE_WINED3D");
+
+    // Steam/Lutris-like: drop host ICD pins that break multi-arch DXVK.
+    if spec.sanitize_vulkan {
+        for key in HOST_VULKAN_ICD_KEYS {
+            cmd.env_remove(*key);
+        }
+    }
+
     for (k, v) in &spec.env {
         cmd.env(k, v);
     }
     if let Some(cwd) = &spec.cwd {
         cmd.current_dir(cwd);
+    }
+}
+
+/// Attach stdio for the child according to `spec.log_level`.
+///
+/// `quiet` discards umu/Proton/Wine spam so daily launches stay readable;
+/// switch back to `normal` when diagnosing a failed start.
+fn apply_log_stdio(cmd: &mut Command, log_level: &str) {
+    if config::normalize_log_level(log_level) == "quiet" {
+        cmd.stdout(Stdio::null());
+        cmd.stderr(Stdio::null());
+    }
+    // normal / verbose: inherit (default for Command)
+}
+
+fn log_banner(level: &str, message: &str) {
+    match config::normalize_log_level(level) {
+        "quiet" => {}
+        _ => eprintln!("{message}"),
     }
 }
 
@@ -175,15 +323,34 @@ fn run_via_umu(umu_run: &Path, spec: &LaunchSpec) -> Result<ExitStatus> {
     cmd.env("GAMEID", &spec.game_id);
     cmd.env("STORE", &spec.store);
     apply_common_env(&mut cmd, spec);
+    apply_log_stdio(&mut cmd, &spec.log_level);
     cmd.arg(&spec.exe);
     cmd.args(&spec.args);
 
-    eprintln!(
-        "proton-cli: backend=umu ({}) STEAM_COMPAT_DATA_PATH={} PROTONPATH={}",
-        umu_run.display(),
-        spec.prefix.display(),
-        spec.proton_path.display()
+    log_banner(
+        &spec.log_level,
+        &format!(
+            "proton-cli: backend=umu ({}) STEAM_COMPAT_DATA_PATH={} PROTONPATH={} graphics={} sanitize_vulkan={} log_level={}",
+            umu_run.display(),
+            spec.prefix.display(),
+            spec.proton_path.display(),
+            spec.graphics,
+            spec.sanitize_vulkan,
+            config::normalize_log_level(&spec.log_level)
+        ),
     );
+    if config::normalize_log_level(&spec.log_level) == "verbose" {
+        eprintln!(
+            "proton-cli: verbose: GAMEID={} STORE={} exe={} args={:?}",
+            spec.game_id,
+            spec.store,
+            spec.exe.display(),
+            spec.args
+        );
+        if !spec.env.is_empty() {
+            eprintln!("proton-cli: verbose: launch env = {:?}", spec.env);
+        }
+    }
 
     Ok(cmd.status()?)
 }
@@ -222,6 +389,7 @@ fn run_via_steam(
         cmd.env("GAMEID", &spec.game_id);
         cmd.env("STORE", &spec.store);
         apply_common_env(&mut cmd, spec);
+        apply_log_stdio(&mut cmd, &spec.log_level);
 
         cmd.arg("--verb=waitforexitandrun");
         cmd.arg("--");
@@ -230,13 +398,32 @@ fn run_via_steam(
         cmd.arg(&spec.exe);
         cmd.args(&spec.args);
 
-        eprintln!(
-            "proton-cli: backend=steam+{} client={} STEAM_COMPAT_DATA_PATH={} PROTON={}",
-            layout.runtime_name,
-            layout.client_install.display(),
-            spec.prefix.display(),
-            spec.proton_path.display()
+        log_banner(
+            &spec.log_level,
+            &format!(
+                "proton-cli: backend=steam+{} client={} STEAM_COMPAT_DATA_PATH={} PROTON={} graphics={} sanitize_vulkan={} log_level={}",
+                layout.runtime_name,
+                layout.client_install.display(),
+                spec.prefix.display(),
+                spec.proton_path.display(),
+                spec.graphics,
+                spec.sanitize_vulkan,
+                config::normalize_log_level(&spec.log_level)
+            ),
         );
+        if config::normalize_log_level(&spec.log_level) == "verbose" {
+            eprintln!(
+                "proton-cli: verbose: GAMEID={} STORE={} SteamAppId={} exe={} args={:?}",
+                spec.game_id,
+                spec.store,
+                steam_app_id,
+                spec.exe.display(),
+                spec.args
+            );
+            if !spec.env.is_empty() {
+                eprintln!("proton-cli: verbose: launch env = {:?}", spec.env);
+            }
+        }
 
         return Ok(cmd.status()?);
     }
@@ -252,16 +439,24 @@ fn run_via_steam(
     cmd.env("GAMEID", &spec.game_id);
     cmd.env("STORE", &spec.store);
     apply_common_env(&mut cmd, spec);
+    apply_log_stdio(&mut cmd, &spec.log_level);
     cmd.arg("run");
     cmd.arg(&spec.exe);
     cmd.args(&spec.args);
 
-    eprintln!(
-        "proton-cli: backend=steam-bare (no SLR container) client={} STEAM_COMPAT_DATA_PATH={} PROTON={}",
-        layout.client_install.display(),
-        spec.prefix.display(),
-        spec.proton_path.display()
+    log_banner(
+        &spec.log_level,
+        &format!(
+            "proton-cli: backend=steam-bare (no SLR container) client={} STEAM_COMPAT_DATA_PATH={} PROTON={} graphics={} sanitize_vulkan={} log_level={}",
+            layout.client_install.display(),
+            spec.prefix.display(),
+            spec.proton_path.display(),
+            spec.graphics,
+            spec.sanitize_vulkan,
+            config::normalize_log_level(&spec.log_level)
+        ),
     );
+    // Setup problem (missing SLR), not game chatter — always surface once.
     eprintln!("proton-cli: warning: install SteamLinuxRuntime (via Steam) for better compatibility");
 
     Ok(cmd.status()?)

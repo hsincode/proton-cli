@@ -32,6 +32,12 @@ pub struct AppEntry {
     pub game_id: String,
     #[serde(default = "default_store")]
     pub store: String,
+    /// Per-app launch locale id (`"ja"`, `"en"`, …). `None` = use global `config.locale`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    /// Per-app D3D backend (`"dxvk"` / `"wined3d"`). `None` = `config.launch.graphics`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphics: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
@@ -130,6 +136,8 @@ pub fn new_entry(
         proton,
         game_id: game_id.unwrap_or_else(default_game_id),
         store: store.unwrap_or_else(default_store),
+        locale: None,
+        graphics: None,
         env: BTreeMap::new(),
         icon: None,
         desktop,

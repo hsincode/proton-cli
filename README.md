@@ -179,13 +179,29 @@ proton-cli tui
 
 | 画面 | 内容 |
 |------|------|
-| Apps | 一覧・起動・削除（prefix は保持） |
-| Register app | name / exe / id / prefix / proton |
+| **Locale**（初回） | 起動ロケール選択（日本語 / English）。`config.locale` 未設定時に必ず表示 |
+| Apps | 一覧・起動・削除（prefix は保持）。**`o`** でアプリ個別 **exe** / locale / graphics |
+| Register app | name / exe / id / prefix / proton（locale・exe は登録後に設定可） |
 | Wine prefixes | 一覧・`pfx-N` 作成・設定の default 変更 |
 | Proton settings | dwproton インストール、prefer managed / steam |
+| Launch settings | グローバル **locale** / **graphics** (dxvk\|wined3d) / **sanitize_vulkan** / **log_level** |
 | Doctor | umu・PROTONPATH・パス確認 |
 
 各画面のタイトル／status にキー操作のヒントがあります（`↑↓` `Enter` `Esc` など）。
+
+### 登録後の exe 変更（TUI）
+
+インストーラを `run` して prefix に入れたあと、本編バイナリへ差し替える流れです。
+
+1. **Apps** → 対象を選んで **`o`**（App settings）
+2. **Exe** を選んで Enter
+3. 探索元を選ぶ  
+   - **Wineprefix** … そのアプリの bottle 内だけ（`drive_c` から開始、外へは出ない）  
+   - **Filesystem** … ホスト上の任意パス（現在の exe の親、または `$HOME` から。`h` / `~` でホームへ）
+4. 一覧は **ディレクトリと `.exe` だけ**（他のファイルは非表示）
+5. ディレクトリは Enter で入る / `.exe` は Enter で確定（`cwd` も exe の親に更新、`.desktop` も再生成）
+
+CLI から本編を最初から登録するなら、従来どおり `add --exe /path/to/Game.exe --prefix <id>` でも可。
 
 ---
 
@@ -211,11 +227,23 @@ proton-cli tui
 
 ```toml
 default_prefix = "default"
+# locale = "ja"   # または "en"。未設定なら TUI 初回で選択
+# 起動時に LANG / LC_ALL / LC_CTYPE を設定。ホストに ja_JP が無くても
+# umu/Steam ランタイムがコンテナ内で生成する（Lutris と同じ）。
 
 [proton]
 default = "dwproton"
 prefer = "managed"   # managed | steam
 # prefer = "steam" にする場合は Steam を入れ、compatibilitytools.d に Proton があること
+
+[launch]
+# Steam/Lutris 同様、ホストの VK_ICD_FILENAMES 固定を外す（32bit DXVK 対策）。既定 true
+sanitize_vulkan = true
+# 既定の D3D 変換: dxvk（Vulkan）| wined3d（OpenGL フォールバック）
+graphics = "dxvk"
+# 起動時の端末ログ量: quiet | normal | verbose（既定 normal）
+# quiet は umu / Proton / Wine の stdout・stderr を捨てる（日々のプレイ向け）
+# log_level = "quiet"
 
 [umu]
 # command = "/usr/bin/umu-run"   # PATH に無いときだけ指定
@@ -227,6 +255,15 @@ categories = ["Game"]
 
 - `prefer = "managed"` … `~/.protoncli/runtimes` と `proton-cli proton install` を主に使う（**Steam 不要**）
 - `prefer = "steam"` … Steam 配下の Proton を優先（**Steam の導入と、そこに Proton があることが前提**）
+- `locale` … グローバル起動ロケール（`ja` / `en`）。アプリに `locale` が無ければこれを使う
+- `[launch].sanitize_vulkan` … ホストの `VK_ICD_FILENAMES` / `VK_DRIVER_FILES` を起動時に外す（Steam/Lutris 相当。x86_64 ICD だけ指定されていると 32bit が落ちる）
+- `[launch].graphics` … グローバル D3D バックエンド（`dxvk` / `wined3d`）
+- `[launch].log_level` … 起動時の端末ログ（`quiet` / `normal` / `verbose`）。TUI の Launch settings、または `run --log-level quiet`
+  - **quiet** … 子プロセス（umu/Proton/Wine）の stdout/stderr を捨て、proton-cli のバナーも出さない
+  - **normal** … 従来どおり子の出力を端末に出す（既定）
+  - **verbose** … normal に加え proton-cli 側の起動診断を追加
+- アプリ個別: `apps.toml` の `locale` / `graphics`、TUI の Apps → **`o`**、または `add --locale ja --graphics dxvk` / `run --locale en --graphics wined3d`
+- 優先順位（env キーごと）: **アプリ `env`（生の LANG 等） > アプリ locale/graphics > グローバル**
 
 ---
 

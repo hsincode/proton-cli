@@ -57,6 +57,12 @@ pub enum Commands {
         /// Do not create a .desktop shortcut
         #[arg(long)]
         no_desktop: bool,
+        /// Per-app launch locale id (`ja`, `en`). Omit to inherit global `config.locale`.
+        #[arg(long)]
+        locale: Option<String>,
+        /// Per-app D3D backend (`dxvk`, `wined3d`). Omit to inherit `config.launch.graphics`.
+        #[arg(long)]
+        graphics: Option<String>,
     },
 
     /// Launch a registered app (used by .desktop shortcuts)
@@ -84,6 +90,18 @@ pub enum Commands {
         /// Working directory
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// One-shot locale id (`ja`, `en`). Default: global `config.locale`.
+        #[arg(long)]
+        locale: Option<String>,
+        /// One-shot D3D backend (`dxvk`, `wined3d`). Default: `config.launch.graphics`.
+        #[arg(long)]
+        graphics: Option<String>,
+        /// Terminal noise: `quiet` | `normal` | `verbose`. Default: `config.launch.log_level`.
+        #[arg(long, value_name = "LEVEL")]
+        log_level: Option<String>,
+        /// Keep host `VK_ICD_FILENAMES` / `VK_DRIVER_FILES` (default: strip like Steam/Lutris).
+        #[arg(long)]
+        no_sanitize_vulkan: bool,
     },
 
     /// List registered apps

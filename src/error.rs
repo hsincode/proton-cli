@@ -9,6 +9,15 @@ pub enum Error {
     #[error("invalid app id `{0}`: use lowercase letters, digits, and hyphens only (e.g. my-game)")]
     InvalidAppId(String),
 
+    #[error("unknown locale `{0}` (known ids: ja, en)")]
+    UnknownLocale(String),
+
+    #[error("unknown graphics `{0}` (known: dxvk, wined3d)")]
+    UnknownGraphics(String),
+
+    #[error("unknown log level `{0}` (known: quiet, normal, verbose)")]
+    UnknownLogLevel(String),
+
     #[error("app `{0}` already exists")]
     AppExists(String),
 

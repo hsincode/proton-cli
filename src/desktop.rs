@@ -103,6 +103,8 @@ mod tests {
             proton: "dwproton".into(),
             game_id: "umu-default".into(),
             store: "none".into(),
+            locale: None,
+            graphics: None,
             env: BTreeMap::new(),
             icon: None,
             desktop: true,

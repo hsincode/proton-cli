@@ -42,6 +42,7 @@ jobs:
 
       - name: Publish to crates.io
         env:
+          # cargo prefers CARGO_REGISTRY_TOKEN over deprecated --token
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -euo pipefail
@@ -50,9 +51,22 @@ jobs:
             echo "::error::Repository secret CARGO_REGISTRY_TOKEN is not set"
             exit 1
           fi
-          # Idempotent-ish: fail with clear message if version already published
-          # Package name on crates.io is `protoncli` (binary remains proton-cli)
-          cargo publish --locked --token "${CARGO_REGISTRY_TOKEN}"
+          # Package name on crates.io is `protoncli` (binary remains proton-cli).
+          # Idempotent: if this exact version is already published (manual publish,
+          # partial re-run), treat as success so forgejo-release still runs.
+          set +e
+          OUT=$(cargo publish --locked 2>&1)
+          RC=$?
+          set -e
+          printf '%s\n' "${OUT}"
+          if [ "${RC}" -eq 0 ]; then
+            exit 0
+          fi
+          if printf '%s' "${OUT}" | grep -qE 'already exists on crates\.io'; then
+            echo "==> Version already on crates.io; treating as success"
+            exit 0
+          fi
+          exit "${RC}"
 
   forgejo-release:
     needs: crates-io
@@ -75,7 +89,8 @@ jobs:
 
           if [ -z "${RELEASE_ID}" ] || [ "${RELEASE_ID}" = "null" ]; then
             echo "==> Creating release ${TAG}"
-            BODY=$(printf '%s' "{\"tag_name\":\"${TAG}\",\"name\":\"proton-cli ${TAG}\",\"body\":\"Published to crates.io as proton-cli. Install: cargo install proton-cli\",\"generate_release_notes\":true}")
+            # crates.io package is protoncli; installed binary is proton-cli
+            BODY=$(printf '%s' "{\"tag_name\":\"${TAG}\",\"name\":\"proton-cli ${TAG}\",\"body\":\"Published to crates.io as **protoncli**. Install: \`cargo install protoncli\` (binary: proton-cli)\",\"generate_release_notes\":true}")
             CREATE_JSON=$(curl -s -H "${AUTH}" -H "Content-Type: application/json" -X POST \
               "${API_BASE}/releases" -d "${BODY}")
             RELEASE_ID=$(printf '%s' "${CREATE_JSON}" | jsonext id)
