@@ -2,14 +2,14 @@
 //!
 //! Covers the settings a player typically needs before launching games:
 //! app list / launch, register app, wine prefixes, Proton runtime, launch settings
-//! (locale / graphics / Vulkan sanitize / log level), **environment variables**, doctor.
+//! (locale / graphics / Vulkan sanitize / log level / gamescope), **environment variables**, doctor.
 //! On first run (`config.locale` unset) a locale picker is shown before the home menu.
-//! Per-app locale / graphics / **exe** / **env** can be set from the Apps list (`o` or `e`).
+//! Per-app locale / graphics / gamescope / **exe** / **env** can be set from the Apps list (`o` or `e`).
 //! Exe change uses a filtered browser (dirs + `.exe` only) over the wineprefix or host FS.
 
 use std::io::{self, stdout};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::cursor::{Hide, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -24,7 +24,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap};
 use ratatui::Terminal;
 
-use crate::apps::{new_entry, AppsDb};
+use crate::apps::{delete_prefix, new_entry, AppsDb, DeletePrefixOutcome};
 use crate::browse::{self, BrowseEntry};
 use crate::config::{self, Config};
 use crate::desktop;
@@ -40,15 +40,17 @@ const LAUNCH_SET_LOCALE: usize = 0;
 const LAUNCH_SET_GRAPHICS: usize = 1;
 const LAUNCH_SET_SANITIZE: usize = 2;
 const LAUNCH_SET_LOG_LEVEL: usize = 3;
-const LAUNCH_SET_LEN: usize = 4;
+const LAUNCH_SET_GAMESCOPE: usize = 4;
+const LAUNCH_SET_LEN: usize = 5;
 
 /// Rows on the per-app settings screen.
 const APP_SET_NAME: usize = 0;
 const APP_SET_EXE: usize = 1;
 const APP_SET_LOCALE: usize = 2;
 const APP_SET_GRAPHICS: usize = 3;
-const APP_SET_ENV: usize = 4;
-const APP_SET_LEN: usize = 5;
+const APP_SET_GAMESCOPE: usize = 4;
+const APP_SET_ENV: usize = 5;
+const APP_SET_LEN: usize = 6;
 
 /// Rows on the “where to browse for exe” chooser.
 const EXE_MODE_PREFIX: usize = 0;
@@ -117,6 +119,17 @@ fn s_field_idle() -> Style {
 fn s_quit() -> Style {
     Style::default().fg(Color::Red)
 }
+/// Error / missing resource (e.g. app row whose wineprefix dir is gone).
+fn s_err() -> Style {
+    Style::default().fg(Color::Red)
+}
+/// Selected row that is also an error (missing prefix): keep selection visible.
+fn s_err_sel() -> Style {
+    Style::default()
+        .fg(Color::Black)
+        .bg(Color::Red)
+        .add_modifier(Modifier::BOLD)
+}
 /// Currently configured Proton (not just cursor highlight).
 fn s_active_item() -> Style {
     Style::default()
@@ -172,6 +185,26 @@ enum AddField {
     Proton,
 }
 
+/// Register-app prefix picker: shared default bottle, per-app auto id, or typed custom id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AddPrefixMode {
+    /// `config.default_prefix` (usually `default` → ~/.protoncli/default).
+    Default,
+    /// Use the resolved app id as the prefix slug (`prefixes/<id>`).
+    Auto,
+    /// User-typed relative id (starts empty until they type).
+    Custom,
+}
+
+/// Why the shared exe browser is open (controls Esc / pick destinations).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrowsePurpose {
+    /// Apps → settings → change exe.
+    AppSettings,
+    /// Register app → pick .exe from host filesystem.
+    AddApp,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EnvEditField {
     Key,
@@ -196,14 +229,23 @@ struct App {
     add_name: String,
     add_exe: String,
     add_id: String,
-    add_prefix: String,
-    add_proton: String,
+    /// Prefix mode for Register app (default / auto / custom).
+    add_prefix_mode: AddPrefixMode,
+    /// Custom prefix id text (only used when [`AddPrefixMode::Custom`]; starts empty).
+    add_prefix_custom: String,
+    /// Selected index into the register-app Proton list (discovered installs).
+    add_proton_sel: usize,
     add_field: AddField,
     app_ids: Vec<String>,
     prefix_ids: Vec<String>,
     /// Discovered Proton installs (name / path / source) for the Proton screen.
     proton_installs: Vec<proton::ProtonInstall>,
     proton_sel: usize,
+    /// Who opened the shared exe browser ([`BrowsePurpose`]).
+    browse_purpose: BrowsePurpose,
+    /// Blinking text cursor for form fields that accept typing.
+    cursor_blink_on: bool,
+    last_blink: Instant,
     /// Index for global locale picker (`selectable`).
     locale_sel: usize,
     /// Index for per-app locale picker (`app_picker_*`, 0 = inherit).
@@ -220,6 +262,8 @@ struct App {
     app_set_sel: usize,
     /// Per-app graphics picker index (0 = inherit, 1 = dxvk, 2 = wined3d).
     app_graphics_sel: usize,
+    /// Per-app gamescope picker index (0 = inherit, 1 = on, 2 = off).
+    app_gamescope_sel: usize,
     /// Selected row on global EnvSettings (index into sorted keys).
     env_sel: usize,
     /// Selected row on AppEnv (0 = mode toggle; 1+ = custom env keys).
@@ -257,7 +301,7 @@ const HOME_ITEMS: &[&str] = &[
     "Register app",
     "Wine prefixes",
     "Proton settings",
-    "Launch settings (locale / graphics / log)",
+    "Launch settings (locale / graphics / gamescope)",
     "Environment variables",
     "Doctor (health check)",
     "Quit",
@@ -286,6 +330,31 @@ fn app_graphics_picker_label(i: usize, global: &str) -> String {
         0 => format!("Use global default  [{g}]"),
         1 => "dxvk  —  Direct3D → Vulkan (default, like Steam)".into(),
         2 => "wined3d  —  Direct3D → OpenGL (fallback if DXVK fails)".into(),
+        _ => "(invalid)".into(),
+    }
+}
+
+fn app_gamescope_picker_index(app: Option<bool>) -> usize {
+    match app {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    }
+}
+
+fn app_gamescope_picker_value(sel: usize) -> Option<bool> {
+    match sel {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
+fn app_gamescope_picker_label(i: usize, global: &config::GamescopeConfig) -> String {
+    match i {
+        0 => format!("Use global default  [{}]", global.status_label()),
+        1 => "on  —  wrap with gamescope (host FS + force nested FS)".into(),
+        2 => "off  —  plain umu/Proton (no gamescope)".into(),
         _ => "(invalid)".into(),
     }
 }
@@ -332,13 +401,17 @@ impl App {
             add_name: String::new(),
             add_exe: String::new(),
             add_id: String::new(),
-            add_prefix: DEFAULT_PREFIX_ID.into(),
-            add_proton: "dwproton".into(),
+            add_prefix_mode: AddPrefixMode::Default,
+            add_prefix_custom: String::new(),
+            add_proton_sel: 0,
             add_field: AddField::Name,
             app_ids: Vec::new(),
             prefix_ids: Vec::new(),
             proton_installs: Vec::new(),
             proton_sel: 0,
+            browse_purpose: BrowsePurpose::AppSettings,
+            cursor_blink_on: true,
+            last_blink: Instant::now(),
             locale_sel,
             app_locale_sel: 0,
             app_settings_id: None,
@@ -347,6 +420,7 @@ impl App {
             launch_set_sel: 0,
             app_set_sel: 0,
             app_graphics_sel: 0,
+            app_gamescope_sel: 0,
             env_sel: 0,
             app_env_sel: 0,
             app_use_custom_env: false,
@@ -422,6 +496,38 @@ impl App {
         Ok(())
     }
 
+    fn toggle_global_gamescope(&mut self) -> Result<()> {
+        // Only the master switch; width / -f / extra_args stay in config.toml.
+        self.config.launch.gamescope.enabled = !self.config.launch.gamescope.enabled;
+        self.config.save(&self.paths)?;
+        self.status = format!(
+            "gamescope = {} (default flags: -f --force-windows-fullscreen)",
+            self.config.launch.gamescope.status_label()
+        );
+        Ok(())
+    }
+
+    fn apply_app_gamescope(&mut self) -> Result<()> {
+        let Some(id) = self.app_settings_id.clone() else {
+            self.status = "no app selected".into();
+            return Ok(());
+        };
+        let value = app_gamescope_picker_value(self.app_gamescope_sel);
+        let mut db = AppsDb::load(&self.paths)?;
+        let entry = db
+            .apps
+            .get_mut(&id)
+            .ok_or_else(|| Error::AppNotFound(id.clone()))?;
+        entry.gamescope = value;
+        db.save(&self.paths)?;
+        self.status = match value {
+            Some(true) => format!("`{id}` gamescope = on (per-app override)"),
+            Some(false) => format!("`{id}` gamescope = off (per-app override)"),
+            None => format!("`{id}` gamescope = inherit global"),
+        };
+        Ok(())
+    }
+
     fn apply_app_locale(&mut self) -> Result<()> {
         let Some(id) = self.app_settings_id.clone() else {
             self.status = "no app selected".into();
@@ -475,6 +581,7 @@ impl App {
         let entry = db.get(&id)?;
         self.app_locale_sel = locale::app_picker_index(entry.locale.as_deref());
         self.app_graphics_sel = app_graphics_picker_index(entry.graphics.as_deref());
+        self.app_gamescope_sel = app_gamescope_picker_index(entry.gamescope);
         self.app_use_custom_env = entry.use_custom_env;
         self.app_settings_exe = entry.exe.clone();
         self.app_settings_name = entry.name.clone();
@@ -819,6 +926,7 @@ impl App {
     }
 
     fn open_exe_browse_mode(&mut self) {
+        self.browse_purpose = BrowsePurpose::AppSettings;
         self.exe_browse_mode_sel = 0;
         let id = self.app_settings_id.as_deref().unwrap_or("?");
         self.status = format!("change exe for `{id}`  ↑↓  Enter  Esc back");
@@ -841,6 +949,7 @@ impl App {
             );
             return Ok(());
         }
+        self.browse_purpose = BrowsePurpose::AppSettings;
         self.browse_floor = Some(prefix.clone());
         self.browse_cwd = browse::start_dir_for_prefix(&prefix);
         self.reload_browse_entries()?;
@@ -853,12 +962,74 @@ impl App {
     /// Start filtered browser on the host filesystem (no floor).
     fn start_browse_filesystem(&mut self) -> Result<()> {
         self.browse_floor = None;
-        self.browse_cwd = browse::start_dir_for_filesystem(&self.app_settings_exe);
+        let start = match self.browse_purpose {
+            BrowsePurpose::AppSettings => {
+                browse::start_dir_for_filesystem(&self.app_settings_exe)
+            }
+            // Register form: seed from the path already picked, else $HOME.
+            BrowsePurpose::AddApp => {
+                browse::start_dir_for_filesystem(Path::new(self.add_exe.trim()))
+            }
+        };
+        self.browse_cwd = start;
         self.reload_browse_entries()?;
-        self.status =
-            "filesystem browse  ↑↓  Enter open/select  Esc mode  (dirs + .exe only)".into();
+        self.status = match self.browse_purpose {
+            BrowsePurpose::AppSettings => {
+                "filesystem browse  ↑↓  Enter open/select  Esc mode  (dirs + .exe only)".into()
+            }
+            BrowsePurpose::AddApp => {
+                "pick .exe  ↑↓  Enter open/select  Esc back to register  (dirs + .exe only)"
+                    .into()
+            }
+        };
         self.screen = Screen::ExeBrowser;
         Ok(())
+    }
+
+    /// Open host-FS exe picker from Register app (no wineprefix yet).
+    fn start_add_app_exe_browser(&mut self) -> Result<()> {
+        self.browse_purpose = BrowsePurpose::AddApp;
+        self.start_browse_filesystem()
+    }
+
+    /// Sync register-form proton cursor to `config.proton.default` when possible.
+    fn reset_add_proton_sel(&mut self) {
+        let def = self.config.proton.default.as_str();
+        if let Some(i) = self.proton_installs.iter().position(|p| p.name == def) {
+            self.add_proton_sel = i;
+        } else if let Some(i) = self.active_proton_index() {
+            self.add_proton_sel = i;
+        } else {
+            self.add_proton_sel = 0;
+        }
+    }
+
+    /// Toggle form text cursor visibility (~2 Hz when the active field accepts typing).
+    fn tick_cursor_blink(&mut self) {
+        if !self.add_field_is_text_input() && self.screen != Screen::AppNameEdit {
+            // Env edit also types; keep blink there too.
+            if self.screen != Screen::EnvEdit {
+                return;
+            }
+        }
+        if self.last_blink.elapsed() >= Duration::from_millis(500) {
+            self.cursor_blink_on = !self.cursor_blink_on;
+            self.last_blink = Instant::now();
+        }
+    }
+
+    fn reset_cursor_blink(&mut self) {
+        self.cursor_blink_on = true;
+        self.last_blink = Instant::now();
+    }
+
+    /// Fields that accept free-text typing on the Register form.
+    fn add_field_is_text_input(&self) -> bool {
+        match self.add_field {
+            AddField::Name | AddField::Id => true,
+            AddField::Prefix => self.add_prefix_mode == AddPrefixMode::Custom,
+            AddField::Exe | AddField::Proton => false,
+        }
     }
 
     fn reload_browse_entries(&mut self) -> Result<()> {
@@ -1045,6 +1216,10 @@ impl App {
             "log_level : {} (quiet hides child stdout/stderr)",
             config::normalize_log_level(&self.config.launch.log_level)
         ));
+        lines.push(format!(
+            "gamescope : {} [global]",
+            self.config.launch.gamescope.status_label()
+        ));
         if report.protons.is_empty() {
             lines.push("Proton    : none".into());
         } else {
@@ -1086,6 +1261,9 @@ fn app_loop(
             drain_pending_events();
             app.needs_full_redraw = false;
         }
+
+        // Blink text cursor while a form field is accepting typing (poll period ~200ms).
+        app.tick_cursor_blink();
 
         terminal.draw(|f| ui(f, app)).map_err(Error::Io)?;
 
@@ -1154,17 +1332,22 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                             app.add_name.clear();
                             app.add_exe.clear();
                             app.add_id.clear();
-                            app.add_prefix = app.config.default_prefix.clone();
-                            app.add_proton = app.config.proton.default.clone();
+                            app.add_prefix_mode = AddPrefixMode::Default;
+                            app.add_prefix_custom.clear();
                             app.add_field = AddField::Name;
+                            app.refresh_lists()?;
+                            app.reset_add_proton_sel();
+                            app.reset_cursor_blink();
                             app.screen = Screen::AddApp;
-                            app.status =
-                                "Tab/C-n C-p fields · Enter save · Esc cancel".into();
+                            app.status = "Tab fields · Enter action (exe pick / prefix cycle / save) · Esc"
+                                .into();
                         }
                         2 => {
                             app.refresh_lists()?;
                             app.screen = Screen::Prefixes;
-                            app.status = "c create · s set default · Esc · nav: jk/C-n C-p".into();
+                            app.status =
+                                "c create · d delete · s set default · Esc · nav: jk/C-n C-p"
+                                    .into();
                         }
                         3 => {
                             app.refresh_lists()?;
@@ -1258,38 +1441,88 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
             }
         }
         Screen::AddApp => {
-            // Form: Ctrl+n/p (and Tab/arrows) change fields; bare j/k type into the field.
+            // Form: Ctrl+n/p (and Tab/arrows) change fields; bare j/k type into text fields.
             if is_nav_next(key, NavMode::Form) {
-                app.add_field = match app.add_field {
-                    AddField::Name => AddField::Exe,
-                    AddField::Exe => AddField::Id,
-                    AddField::Id => AddField::Prefix,
-                    AddField::Prefix => AddField::Proton,
-                    AddField::Proton => AddField::Name,
-                };
+                // On Proton field, Down alone cycles the install list (list UX).
+                if app.add_field == AddField::Proton
+                    && matches!(key.code, KeyCode::Down)
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    cycle_add_proton(app, 1);
+                } else {
+                    app.add_field = match app.add_field {
+                        AddField::Name => AddField::Exe,
+                        AddField::Exe => AddField::Id,
+                        AddField::Id => AddField::Prefix,
+                        AddField::Prefix => AddField::Proton,
+                        AddField::Proton => AddField::Name,
+                    };
+                    app.reset_cursor_blink();
+                }
             } else if is_nav_prev(key, NavMode::Form) {
-                app.add_field = match app.add_field {
-                    AddField::Name => AddField::Proton,
-                    AddField::Exe => AddField::Name,
-                    AddField::Id => AddField::Exe,
-                    AddField::Prefix => AddField::Id,
-                    AddField::Proton => AddField::Prefix,
-                };
+                if app.add_field == AddField::Proton
+                    && matches!(key.code, KeyCode::Up)
+                    && !key.modifiers.contains(KeyModifiers::CONTROL)
+                {
+                    cycle_add_proton(app, -1);
+                } else {
+                    app.add_field = match app.add_field {
+                        AddField::Name => AddField::Proton,
+                        AddField::Exe => AddField::Name,
+                        AddField::Id => AddField::Exe,
+                        AddField::Prefix => AddField::Id,
+                        AddField::Proton => AddField::Prefix,
+                    };
+                    app.reset_cursor_blink();
+                }
             } else {
                 match key.code {
                     KeyCode::Esc => {
                         app.screen = Screen::Home;
                         app.status = "↑↓/jk/C-n C-p move  Enter select  Esc back  q quit".into();
                     }
-                    KeyCode::Char(c)
-                        if !c.is_control() && !key.modifiers.contains(KeyModifiers::CONTROL) =>
+                    // Proton list: j/k or ←→ also cycle (Tab/C-n still leave the field).
+                    KeyCode::Char('j')
+                        if app.add_field == AddField::Proton
+                            && key.modifiers.is_empty() =>
                     {
-                        field_mut(app).push(c);
+                        cycle_add_proton(app, 1);
                     }
-                    KeyCode::Backspace => {
-                        field_mut(app).pop();
+                    KeyCode::Char('k')
+                        if app.add_field == AddField::Proton
+                            && key.modifiers.is_empty() =>
+                    {
+                        cycle_add_proton(app, -1);
                     }
-                    KeyCode::Enter => save_new_app(app)?,
+                    KeyCode::Left | KeyCode::Right
+                        if app.add_field == AddField::Proton =>
+                    {
+                        let dir = if key.code == KeyCode::Right { 1 } else { -1 };
+                        cycle_add_proton(app, dir);
+                    }
+                    KeyCode::Char(c)
+                        if !c.is_control()
+                            && !key.modifiers.contains(KeyModifiers::CONTROL)
+                            && app.add_field_is_text_input() =>
+                    {
+                        if let Some(buf) = add_text_field_mut(app) {
+                            buf.push(c);
+                            app.reset_cursor_blink();
+                        }
+                    }
+                    KeyCode::Backspace if app.add_field_is_text_input() => {
+                        if let Some(buf) = add_text_field_mut(app) {
+                            buf.pop();
+                            app.reset_cursor_blink();
+                        }
+                    }
+                    // Space is typed into text fields; only non-text rows treat Space as activate.
+                    KeyCode::Enter => {
+                        handle_add_app_activate(app, key.code)?;
+                    }
+                    KeyCode::Char(' ') if !app.add_field_is_text_input() => {
+                        handle_add_app_activate(app, key.code)?;
+                    }
                     _ => {}
                 }
             }
@@ -1322,6 +1555,33 @@ fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
                             }
                         }
                         app.refresh_lists()?;
+                    }
+                    // Delete managed bottle; no --force in TUI (use CLI if apps still reference it).
+                    KeyCode::Char('d') => {
+                        if let Some(i) = app.prefix_state.selected() {
+                            if let Some(id) = app.prefix_ids.get(i).cloned() {
+                                let db = AppsDb::load(&app.paths)?;
+                                match delete_prefix(&app.paths, &db, &id, false) {
+                                    Ok(DeletePrefixOutcome::Removed(path)) => {
+                                        app.status = format!(
+                                            "removed prefix `{id}`  ({})",
+                                            path.display()
+                                        );
+                                        app.refresh_lists()?;
+                                    }
+                                    Ok(DeletePrefixOutcome::AlreadyGone(path)) => {
+                                        app.status = format!(
+                                            "prefix `{id}` already gone  ({})",
+                                            path.display()
+                                        );
+                                        app.refresh_lists()?;
+                                    }
+                                    Err(e) => {
+                                        app.status = format!("{e}");
+                                    }
+                                }
+                            }
+                        }
                     }
                     KeyCode::Char('s') => {
                         if let Some(i) = app.prefix_state.selected() {
@@ -1573,6 +1833,7 @@ fn handle_launch_settings_key(app: &mut App, key: KeyEvent) -> Result<()> {
             LAUNCH_SET_GRAPHICS => app.cycle_global_graphics()?,
             LAUNCH_SET_SANITIZE => app.toggle_sanitize_vulkan()?,
             LAUNCH_SET_LOG_LEVEL => app.cycle_log_level()?,
+            LAUNCH_SET_GAMESCOPE => app.toggle_global_gamescope()?,
             _ => {}
         },
         _ => {}
@@ -1607,6 +1868,11 @@ fn handle_app_settings_key(app: &mut App, key: KeyEvent) -> Result<()> {
                 // Cycle inherit → dxvk → wined3d → inherit.
                 app.app_graphics_sel = (app.app_graphics_sel + 1) % 3;
                 app.apply_app_graphics()?;
+            }
+            APP_SET_GAMESCOPE => {
+                // Cycle inherit → on → off → inherit.
+                app.app_gamescope_sel = (app.app_gamescope_sel + 1) % 3;
+                app.apply_app_gamescope()?;
             }
             APP_SET_ENV => app.open_app_env_settings()?,
             _ => {}
@@ -1775,6 +2041,7 @@ fn handle_env_edit_key(app: &mut App, key: KeyEvent) -> Result<()> {
 }
 
 fn handle_exe_browse_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    // Register form never opens this mode (goes straight to host FS).
     if is_nav_prev(key, NavMode::List) {
         cycle_prev(&mut app.exe_browse_mode_sel, EXE_MODE_LEN);
         return Ok(());
@@ -1789,11 +2056,14 @@ fn handle_exe_browse_mode_key(app: &mut App, key: KeyEvent) -> Result<()> {
             app.status = format!("settings for `{id}`  ↑↓/jk/C-n C-p  Enter edit  Esc back");
             app.screen = Screen::AppSettings;
         }
-        KeyCode::Enter | KeyCode::Char(' ') => match app.exe_browse_mode_sel {
-            EXE_MODE_PREFIX => app.start_browse_prefix()?,
-            EXE_MODE_FILESYSTEM => app.start_browse_filesystem()?,
-            _ => {}
-        },
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            app.browse_purpose = BrowsePurpose::AppSettings;
+            match app.exe_browse_mode_sel {
+                EXE_MODE_PREFIX => app.start_browse_prefix()?,
+                EXE_MODE_FILESYSTEM => app.start_browse_filesystem()?,
+                _ => {}
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -1810,9 +2080,16 @@ fn handle_exe_browser_key(app: &mut App, key: KeyEvent) -> Result<()> {
         return Ok(());
     }
     match key.code {
-        KeyCode::Esc | KeyCode::Char('q') => {
-            app.open_exe_browse_mode();
-        }
+        KeyCode::Esc | KeyCode::Char('q') => match app.browse_purpose {
+            BrowsePurpose::AppSettings => app.open_exe_browse_mode(),
+            BrowsePurpose::AddApp => {
+                app.screen = Screen::AddApp;
+                app.add_field = AddField::Exe;
+                app.status =
+                    "exe picker cancelled  · Enter pick again · Tab fields · Enter save on Name"
+                        .into();
+            }
+        },
         KeyCode::Enter | KeyCode::Char(' ') => {
             let Some(idx) = app.browse_state.selected() else {
                 app.status = "empty directory (Esc back)".into();
@@ -1837,17 +2114,37 @@ fn handle_exe_browser_key(app: &mut App, key: KeyEvent) -> Result<()> {
                     app.browse_state.select(Some(0));
                     app.reload_browse_entries()?;
                 }
-                BrowseAction::PickExe(path) => {
-                    app.apply_app_exe(path)?;
-                    // Status already set by apply; append navigation hint on success.
-                    if !app.status.contains("failed")
-                        && !app.status.contains("not found")
-                        && !app.status.contains("not a .exe")
-                    {
-                        app.status = format!("{}  · Esc Apps", app.status);
+                BrowseAction::PickExe(path) => match app.browse_purpose {
+                    BrowsePurpose::AppSettings => {
+                        app.apply_app_exe(path)?;
+                        // Status already set by apply; append navigation hint on success.
+                        if !app.status.contains("failed")
+                            && !app.status.contains("not found")
+                            && !app.status.contains("not a .exe")
+                        {
+                            app.status = format!("{}  · Esc Apps", app.status);
+                        }
+                        app.screen = Screen::AppSettings;
                     }
-                    app.screen = Screen::AppSettings;
-                }
+                    BrowsePurpose::AddApp => {
+                        if !path.is_file() {
+                            app.status = format!("exe not found: {}", path.display());
+                            return Ok(());
+                        }
+                        if !browse::is_windows_exe(&path) {
+                            app.status = format!("not a .exe: {}", path.display());
+                            return Ok(());
+                        }
+                        app.add_exe = path.display().to_string();
+                        app.add_field = AddField::Id;
+                        app.reset_cursor_blink();
+                        app.status = format!(
+                            "exe = {}  · Tab fields · Enter save on Name/Id",
+                            path.display()
+                        );
+                        app.screen = Screen::AddApp;
+                    }
+                },
             }
         }
         // Quick jump: home directory (filesystem mode only — prefix floor ignores this).
@@ -1863,6 +2160,94 @@ fn handle_exe_browser_key(app: &mut App, key: KeyEvent) -> Result<()> {
     Ok(())
 }
 
+/// Enter/Space on a Register-app field: pick / cycle / save depending on the row.
+fn handle_add_app_activate(app: &mut App, code: KeyCode) -> Result<()> {
+    let is_space = matches!(code, KeyCode::Char(' '));
+    match app.add_field {
+        // Built-in host FS picker (prefix may not exist yet at register time).
+        AddField::Exe => {
+            app.start_add_app_exe_browser()?;
+        }
+        // Enter/Space cycles default → auto → custom (custom starts with empty text).
+        AddField::Prefix => {
+            app.add_prefix_mode = match app.add_prefix_mode {
+                AddPrefixMode::Default => AddPrefixMode::Auto,
+                AddPrefixMode::Auto => AddPrefixMode::Custom,
+                AddPrefixMode::Custom => AddPrefixMode::Default,
+            };
+            app.reset_cursor_blink();
+            app.status = match app.add_prefix_mode {
+                AddPrefixMode::Default => {
+                    "prefix = default (shared ~/.protoncli/default)".into()
+                }
+                AddPrefixMode::Auto => "prefix = auto (same slug as app id)".into(),
+                AddPrefixMode::Custom => "prefix = custom (type a relative id)".into(),
+            };
+        }
+        // Space cycles Proton list; Enter saves the form with the selected install.
+        AddField::Proton if is_space => {
+            cycle_add_proton(app, 1);
+        }
+        AddField::Name | AddField::Id | AddField::Proton => {
+            save_new_app(app)?;
+        }
+    }
+    Ok(())
+}
+
+fn cycle_add_proton(app: &mut App, dir: i32) {
+    let n = app.proton_installs.len().max(1);
+    if app.proton_installs.is_empty() {
+        app.add_proton_sel = 0;
+        app.status = "no Proton installs found — run Proton settings [i] install".into();
+        return;
+    }
+    let cur = app.add_proton_sel.min(n - 1) as i32;
+    let next = (cur + dir).rem_euclid(n as i32) as usize;
+    app.add_proton_sel = next;
+    if let Some(p) = app.proton_installs.get(next) {
+        app.status = format!("proton = {} [{}]", p.name, p.source);
+    }
+}
+
+/// Resolved app id for the register form (explicit or slug from name/exe).
+fn add_resolved_id(app: &App) -> String {
+    if !app.add_id.trim().is_empty() {
+        return app.add_id.trim().to_string();
+    }
+    let name = {
+        let n = app.add_name.trim();
+        if n.is_empty() {
+            crate::paths::name_from_exe(Path::new(app.add_exe.trim()))
+        } else {
+            n.to_string()
+        }
+    };
+    slugify(&name)
+}
+
+/// Prefix id that will be written on save for the current mode.
+fn add_resolved_prefix(app: &App) -> std::result::Result<String, String> {
+    match app.add_prefix_mode {
+        AddPrefixMode::Default => Ok(app.config.default_prefix.clone()),
+        AddPrefixMode::Auto => Ok(add_resolved_id(app)),
+        AddPrefixMode::Custom => {
+            let p = app.add_prefix_custom.trim();
+            if p.is_empty() {
+                return Err("custom prefix is empty — type an id or switch mode".into());
+            }
+            Ok(p.to_string())
+        }
+    }
+}
+
+fn add_resolved_proton(app: &App) -> String {
+    app.proton_installs
+        .get(app.add_proton_sel)
+        .map(|p| p.name.clone())
+        .unwrap_or_else(|| app.config.proton.default.clone())
+}
+
 
 enum BrowseAction {
     Up,
@@ -1873,7 +2258,7 @@ enum BrowseAction {
 fn save_new_app(app: &mut App) -> Result<()> {
     let exe = PathBuf::from(app.add_exe.trim());
     if app.add_exe.trim().is_empty() {
-        app.status = "exe is required".into();
+        app.status = "exe is required — focus Exe and Enter to pick".into();
         return Ok(());
     }
     // Match CLI: empty name → stem of the exe (editable later in App settings).
@@ -1885,19 +2270,17 @@ fn save_new_app(app: &mut App) -> Result<()> {
             n.to_string()
         }
     };
-    let id = if app.add_id.trim().is_empty() {
-        slugify(&name)
-    } else {
-        app.add_id.trim().to_string()
-    };
+    let id = add_resolved_id(app);
     if !is_valid_app_id(&id) {
         app.status = format!("invalid id `{id}`");
         return Ok(());
     }
-    let prefix = if app.add_prefix.trim().is_empty() {
-        app.config.default_prefix.clone()
-    } else {
-        app.add_prefix.trim().to_string()
+    let prefix = match add_resolved_prefix(app) {
+        Ok(p) => p,
+        Err(msg) => {
+            app.status = msg;
+            return Ok(());
+        }
     };
     if !PathBuf::from(&prefix).is_absolute()
         && prefix != DEFAULT_PREFIX_ID
@@ -1906,11 +2289,7 @@ fn save_new_app(app: &mut App) -> Result<()> {
         app.status = format!("invalid prefix id `{prefix}`");
         return Ok(());
     }
-    let proton = if app.add_proton.trim().is_empty() {
-        "dwproton".into()
-    } else {
-        app.add_proton.trim().to_string()
-    };
+    let proton = add_resolved_proton(app);
     let create_desktop = app.config.desktop.create_on_add;
     match new_entry(
         name,
@@ -1956,13 +2335,15 @@ fn save_new_app(app: &mut App) -> Result<()> {
     Ok(())
 }
 
-fn field_mut(app: &mut App) -> &mut String {
+/// Mutable buffer for the active register-form text field, if any.
+fn add_text_field_mut(app: &mut App) -> Option<&mut String> {
     match app.add_field {
-        AddField::Name => &mut app.add_name,
-        AddField::Exe => &mut app.add_exe,
-        AddField::Id => &mut app.add_id,
-        AddField::Prefix => &mut app.add_prefix,
-        AddField::Proton => &mut app.add_proton,
+        AddField::Name => Some(&mut app.add_name),
+        AddField::Id => Some(&mut app.add_id),
+        AddField::Prefix if app.add_prefix_mode == AddPrefixMode::Custom => {
+            Some(&mut app.add_prefix_custom)
+        }
+        AddField::Exe | AddField::Prefix | AddField::Proton => None,
     }
 }
 
@@ -2095,14 +2476,23 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         }
         Screen::Apps => {
             let db = AppsDb::load(&app.paths).ok();
+            // Whether the cursor row is a missing-prefix app (drives highlight_style color).
+            let sel_missing = app
+                .apps_state
+                .selected()
+                .and_then(|i| app.app_ids.get(i))
+                .and_then(|id| db.as_ref().and_then(|d| d.apps.get(id)))
+                .is_some_and(|e| !app.paths.prefix_path(&e.prefix).is_dir());
             let items: Vec<ListItem> = app
                 .app_ids
                 .iter()
                 .map(|id| {
-                    let detail = db
+                    let (text, missing) = db
                         .as_ref()
                         .and_then(|d| d.apps.get(id))
                         .map(|e| {
+                            // Missing = resolved path is not a directory (empty ensure_prefix dirs count as present).
+                            let missing = !app.paths.prefix_path(&e.prefix).is_dir();
                             let loc = match e.locale.as_deref() {
                                 Some(l) => format!("loc={l}"),
                                 None => "loc=global".into(),
@@ -2111,72 +2501,37 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                                 Some(g) => format!("gfx={g}"),
                                 None => "gfx=global".into(),
                             };
-                            format!(
-                                "{id}  —  {}  pfx={}  {loc}  {gfx}  {}",
+                            let pfx_mark = if missing {
+                                format!("pfx={}  [NO PREFIX]", e.prefix)
+                            } else {
+                                format!("pfx={}", e.prefix)
+                            };
+                            let text = format!(
+                                "{id}  —  {}  {pfx_mark}  {loc}  {gfx}  {}",
                                 e.name,
-                                e.prefix,
                                 e.exe.display()
-                            )
+                            );
+                            (text, missing)
                         })
-                        .unwrap_or_else(|| id.clone());
-                    ListItem::new(detail)
+                        .unwrap_or_else(|| (id.clone(), false));
+                    // Unselected missing rows stay red; selected style comes from highlight_style.
+                    if missing {
+                        ListItem::new(Span::styled(text, s_err()))
+                    } else {
+                        ListItem::new(text)
+                    }
                 })
                 .collect();
             let list = List::new(items)
                 .block(block_main(
-                    "Apps  [Enter/l]  [o/e settings]  [d]  [r]  [jk/C-n C-p]  [Esc]",
+                    "Apps  [Enter/l]  [o/e]  [d]  [r]  [red = NO PREFIX]  [Esc]",
                 ))
-                .highlight_style(s_sel())
+                .highlight_style(if sel_missing { s_err_sel() } else { s_sel() })
                 .highlight_symbol("> ");
             f.render_stateful_widget(list, chunks[1], &mut app.apps_state);
         }
         Screen::AddApp => {
-            let id_hint = if app.add_id.is_empty() {
-                format!("(auto: {})", slugify(&app.add_name))
-            } else {
-                String::new()
-            };
-            let row = |fld: AddField, label: &str, value: &str, extra: &str| -> Line<'static> {
-                let active = app.add_field == fld;
-                let mark = if active { ">" } else { " " };
-                let label_s = if active { s_field_active() } else { s_field_idle() };
-                let val_s = if active {
-                    Style::default()
-                        .fg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(Color::White)
-                };
-                Line::from(vec![
-                    Span::styled(format!("{mark} {label}: "), label_s),
-                    Span::styled(value.to_string(), val_s),
-                    Span::styled(format!(" {extra}"), s_dim()),
-                ])
-            };
-            let lines = vec![
-                row(AddField::Name, "Name  ", &app.add_name, ""),
-                row(AddField::Exe, "Exe   ", &app.add_exe, ""),
-                row(AddField::Id, "Id    ", &app.add_id, &id_hint),
-                row(AddField::Prefix, "Prefix", &app.add_prefix, ""),
-                row(AddField::Proton, "Proton", &app.add_proton, ""),
-                Line::from(""),
-                Line::from(Span::styled(
-                    "Prefix: `default` → ~/.protoncli/default; other id → prefixes/<id>",
-                    s_dim(),
-                )),
-                Line::from(Span::styled(
-                    "Name empty → use exe file stem (same as CLI). Locale/graphics/env inherit global.",
-                    s_dim(),
-                )),
-                Line::from(Span::styled(
-                    "Field nav: Tab · ↑↓ · Ctrl+n/p · Ctrl+j/k  ·  Enter save · Esc",
-                    s_hint(),
-                )),
-            ];
-            let p = Paragraph::new(lines)
-                .block(block_main("Register app"))
-                .wrap(Wrap { trim: false });
-            f.render_widget(p, chunks[1]);
+            ui_add_app(f, app, chunks[1]);
         }
         Screen::Prefixes => {
             let items: Vec<ListItem> = app
@@ -2196,7 +2551,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                 .collect();
             let list = List::new(items)
                 .block(block_main(
-                    "Prefixes  [c create pfx-N]  [s set default]  [Enter path]  [Esc]",
+                    "Prefixes  [c create]  [d delete]  [s set default]  [Enter path]  [Esc]",
                 ))
                 .highlight_style(s_sel())
                 .highlight_symbol("> ");
@@ -2238,12 +2593,19 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         || app.status.contains("invalid")
         || app.status.contains("required")
         || app.status.contains("error")
+        || app.status.contains("refusing")
+        || app.status.contains("is used by apps")
     {
         s_warn()
+    } else if app.status.contains("removed prefix")
+        || app.status.contains("already gone")
+    {
+        s_ok()
     } else if app.status.contains("locale =")
         || app.status.contains("graphics =")
         || app.status.contains("sanitize_vulkan =")
         || app.status.contains("log_level =")
+        || app.status.contains("gamescope =")
         || app.status.contains("env mode =")
         || app.status.contains("env `")
         || app.status.contains("global env")
@@ -2266,6 +2628,261 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
             .title(Span::styled("status", s_accent())),
     );
     f.render_widget(status, chunks[2]);
+}
+
+/// Register app form: text fields with blink cursor, exe picker, prefix modes, proton list.
+fn ui_add_app(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let resolved_id = add_resolved_id(app);
+    let id_hint = if app.add_id.trim().is_empty() {
+        format!("(auto: {resolved_id})")
+    } else {
+        String::new()
+    };
+
+    let cursor = |active: bool| -> Span<'static> {
+        if active && app.cursor_blink_on {
+            Span::styled("▌".to_string(), s_field_active())
+        } else if active {
+            Span::styled(" ".to_string(), s_dim())
+        } else {
+            Span::raw("")
+        }
+    };
+
+    let text_row =
+        |fld: AddField, label: &str, value: &str, extra: &str, typing: bool| -> Line<'static> {
+            let active = app.add_field == fld;
+            let mark = if active { ">" } else { " " };
+            let label_s = if active {
+                s_field_active()
+            } else {
+                s_field_idle()
+            };
+            let val_s = if active && typing {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+                    .bg(Color::DarkGray)
+            } else if active {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::White)
+            };
+            // Empty inactive fields show a placeholder; active empty fields rely on the blink caret.
+            let display = if value.is_empty() && !active {
+                "(empty)".to_string()
+            } else if value.is_empty() && active && typing {
+                String::new()
+            } else {
+                value.to_string()
+            };
+            let mut spans = vec![
+                Span::styled(format!("{mark} {label}: "), label_s),
+                Span::styled(display, val_s),
+            ];
+            if typing {
+                spans.push(cursor(active));
+            }
+            if !extra.is_empty() {
+                spans.push(Span::styled(format!(" {extra}"), s_dim()));
+            }
+            Line::from(spans)
+        };
+
+    // --- Prefix mode chips (default / auto / custom) ---
+    let pfx_active = app.add_field == AddField::Prefix;
+    let chip = |mode: AddPrefixMode, label: &str| -> Span<'static> {
+        let on = app.add_prefix_mode == mode;
+        let style = if on && pfx_active {
+            s_sel()
+        } else if on {
+            s_active_item()
+        } else if pfx_active {
+            Style::default().fg(Color::White)
+        } else {
+            s_dim()
+        };
+        let text = if on {
+            format!("[{label}]")
+        } else {
+            format!(" {label} ")
+        };
+        Span::styled(text, style)
+    };
+    let pfx_preview = match app.add_prefix_mode {
+        AddPrefixMode::Default => format!(
+            "→ {}  ({})",
+            app.config.default_prefix,
+            app.paths.prefix_path(&app.config.default_prefix).display()
+        ),
+        AddPrefixMode::Auto => format!(
+            "→ {resolved_id}  ({})",
+            app.paths.prefix_path(&resolved_id).display()
+        ),
+        AddPrefixMode::Custom => {
+            if app.add_prefix_custom.trim().is_empty() {
+                "→ (type a relative id)".into()
+            } else {
+                let p = app.add_prefix_custom.trim();
+                format!("→ {p}  ({})", app.paths.prefix_path(p).display())
+            }
+        }
+    };
+    let mut prefix_line = vec![
+        Span::styled(
+            if pfx_active { "> Prefix: " } else { "  Prefix: " }.to_string(),
+            if pfx_active {
+                s_field_active()
+            } else {
+                s_field_idle()
+            },
+        ),
+        chip(AddPrefixMode::Default, "default"),
+        Span::raw(" "),
+        chip(AddPrefixMode::Auto, "auto"),
+        Span::raw(" "),
+        chip(AddPrefixMode::Custom, "custom"),
+        Span::styled(format!("  {pfx_preview}"), s_dim()),
+    ];
+    if pfx_active && app.add_prefix_mode != AddPrefixMode::Custom {
+        prefix_line.push(Span::styled("  (Enter cycle)", s_hint()));
+    }
+
+    let custom_row = if app.add_prefix_mode == AddPrefixMode::Custom {
+        Some(text_row(
+            AddField::Prefix,
+            "  id   ",
+            &app.add_prefix_custom,
+            "(relative slug)",
+            true,
+        ))
+    } else {
+        None
+    };
+
+    // --- Exe picker row ---
+    let exe_active = app.add_field == AddField::Exe;
+    let exe_display = if app.add_exe.trim().is_empty() {
+        "(Enter → built-in file picker)".to_string()
+    } else {
+        app.add_exe.clone()
+    };
+    let exe_line = Line::from(vec![
+        Span::styled(
+            if exe_active { "> Exe   : " } else { "  Exe   : " }.to_string(),
+            if exe_active {
+                s_field_active()
+            } else {
+                s_field_idle()
+            },
+        ),
+        Span::styled(
+            exe_display,
+            if exe_active {
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else if app.add_exe.is_empty() {
+                s_dim()
+            } else {
+                Style::default().fg(Color::White)
+            },
+        ),
+        if exe_active {
+            Span::styled("  [Enter pick]", s_hint())
+        } else {
+            Span::raw("")
+        },
+    ]);
+
+    // --- Proton list (expanded when field focused) ---
+    let proton_active = app.add_field == AddField::Proton;
+    let mut lines: Vec<Line> = vec![
+        text_row(
+            AddField::Name,
+            "Name  ",
+            &app.add_name,
+            if app.add_name.is_empty() {
+                "(optional → exe stem)"
+            } else {
+                ""
+            },
+            true,
+        ),
+        exe_line,
+        text_row(AddField::Id, "Id    ", &app.add_id, &id_hint, true),
+        Line::from(prefix_line),
+    ];
+    if let Some(row) = custom_row {
+        lines.push(row);
+    }
+
+    lines.push(Span::styled(
+        if proton_active {
+            "> Proton:"
+        } else {
+            "  Proton:"
+        }
+        .to_string(),
+        if proton_active {
+            s_field_active()
+        } else {
+            s_field_idle()
+        },
+    )
+    .into());
+
+    if app.proton_installs.is_empty() {
+        let sel = add_resolved_proton(app);
+        lines.push(Line::from(Span::styled(
+            format!("    (none discovered) using logical `{sel}` — install via Proton settings"),
+            s_warn(),
+        )));
+    } else if proton_active {
+        // Full list while focused so ↑↓/jk pick an install.
+        for (i, p) in app.proton_installs.iter().enumerate() {
+            let on = i == app.add_proton_sel.min(app.proton_installs.len() - 1);
+            let mark = if on { "❯ " } else { "  " };
+            let style = if on { s_sel() } else { Style::default().fg(Color::White) };
+            lines.push(Line::from(Span::styled(
+                format!("{mark}[{}] {}  {}", p.source, p.name, p.path.display()),
+                style,
+            )));
+        }
+        lines.push(Line::from(Span::styled(
+            "    ↑↓/jk/←→ cycle · Space next · Enter save form",
+            s_hint(),
+        )));
+    } else {
+        // Collapsed summary of the current choice.
+        let p = app.proton_installs.get(app.add_proton_sel);
+        let text = match p {
+            Some(p) => format!("    [{}] {}", p.source, p.name),
+            None => format!("    {}", add_resolved_proton(app)),
+        };
+        lines.push(Line::from(Span::styled(text, Style::default().fg(Color::White))));
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Prefix: default = shared bottle · auto = prefixes/<app-id> · custom = type id",
+        s_dim(),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Name empty → exe stem. Locale / graphics / env inherit global after register.",
+        s_dim(),
+    )));
+    lines.push(Line::from(Span::styled(
+        "Nav: Tab·↑↓·C-n/p  ·  Exe Enter=pick  ·  Prefix Enter=cycle  ·  Save=Enter on Name/Id/Proton  ·  Esc",
+        s_hint(),
+    )));
+
+    let p = Paragraph::new(lines)
+        .block(block_main("Register app"))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
 }
 
 /// Proton settings: highlight the active default and let Enter pick another install.
@@ -2505,8 +3122,10 @@ fn ui_launch_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         "verbose" => "Inherit streams + extra protoncli launch diagnostics",
         _ => "Show umu/Proton/Wine output on the terminal (default)",
     };
+    let gs = app.config.launch.gamescope.status_label();
+    let gs_hint = "Wrap launches: gamescope -f --force-windows-fullscreen -- <backend> (default off)";
 
-    let rows: [(&str, String, &str); 4] = [
+    let rows: [(&str, String, &str); 5] = [
         (
             "Locale",
             loc,
@@ -2526,6 +3145,11 @@ fn ui_launch_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
             "Log level",
             log_level.into(),
             log_hint,
+        ),
+        (
+            "Gamescope",
+            gs,
+            gs_hint,
         ),
     ];
 
@@ -2854,6 +3478,14 @@ fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         ),
         Some(g) => g.to_string(),
     };
+    let gs = match app_gamescope_picker_value(app.app_gamescope_sel) {
+        None => format!(
+            "inherit global [{}]",
+            app.config.launch.gamescope.status_label()
+        ),
+        Some(true) => "on".into(),
+        Some(false) => "off".into(),
+    };
     let env_disp = if app.app_use_custom_env {
         let n = AppsDb::load(&app.paths)
             .ok()
@@ -2864,11 +3496,12 @@ fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         "default (global [launch.env] only)".into()
     };
 
-    let rows: [(&str, String); 5] = [
+    let rows: [(&str, String); 6] = [
         ("Name", name_disp),
         ("Exe", exe_disp),
         ("Locale", loc),
         ("Graphics", gfx),
+        ("Gamescope", gs),
         ("Env", env_disp),
     ];
 
@@ -2903,7 +3536,7 @@ fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Nav: ↑↓/jk/C-n C-p · Name: edit · Exe: browse · Locale · Graphics · Env",
+        "Nav: ↑↓/jk/C-n C-p · Name · Exe · Locale · Graphics · Gamescope · Env",
         s_hint(),
     )));
     lines.push(Line::from(Span::styled("Esc back to Apps", s_hint())));
@@ -2923,6 +3556,26 @@ fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 app_graphics_picker_label(i, &app.config.launch.graphics)
             ),
             if app.app_graphics_sel == i {
+                s_ok()
+            } else {
+                s_dim()
+            },
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled("Gamescope options:", s_title())));
+    for i in 0..3 {
+        let mark = if app.app_gamescope_sel == i {
+            "* "
+        } else {
+            "  "
+        };
+        lines.push(Line::from(Span::styled(
+            format!(
+                "{mark}{}",
+                app_gamescope_picker_label(i, &app.config.launch.gamescope)
+            ),
+            if app.app_gamescope_sel == i {
                 s_ok()
             } else {
                 s_dim()

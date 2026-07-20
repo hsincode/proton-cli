@@ -18,7 +18,7 @@ use std::process::ExitCode;
 
 use clap::Parser;
 
-use crate::apps::{new_entry, AppsDb};
+use crate::apps::{delete_prefix, new_entry, AppsDb, DeletePrefixOutcome};
 use crate::cli::{Cli, Commands, DesktopCmd, PrefixCmd, ProtonCmd};
 use crate::config::{
     is_valid_graphics, is_valid_log_level, normalize_graphics, normalize_log_level, Config,
@@ -66,6 +66,8 @@ fn try_main() -> Result<ExitCode, Error> {
             no_desktop,
             locale,
             graphics,
+            gamescope,
+            no_gamescope,
         } => {
             // `--name` optional: default to exe stem so `add --exe ./Game.exe` is enough.
             let name = name.unwrap_or_else(|| name_from_exe(&exe));
@@ -105,6 +107,11 @@ fn try_main() -> Result<ExitCode, Error> {
             )?;
             entry.locale = locale;
             entry.graphics = graphics;
+            entry.gamescope = match (gamescope, no_gamescope) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
 
             let mut db = AppsDb::load(&paths)?;
             db.insert(id.clone(), entry.clone())?;
@@ -127,13 +134,24 @@ fn try_main() -> Result<ExitCode, Error> {
             if let Some(gfx) = &entry.graphics {
                 println!("  graphics: {gfx} (per-app)");
             }
+            if let Some(gs) = entry.gamescope {
+                println!(
+                    "  gamescope: {} (per-app)",
+                    if gs { "on" } else { "off" }
+                );
+            }
             Ok(ExitCode::SUCCESS)
         }
 
-        Commands::Launch { id } => {
+        Commands::Launch {
+            id,
+            gamescope,
+            no_gamescope,
+        } => {
             let db = AppsDb::load(&paths)?;
             let entry = db.get(&id)?;
-            let spec = launch::LaunchSpec::from_app(&paths, &config, entry)?;
+            let mut spec = launch::LaunchSpec::from_app(&paths, &config, entry)?;
+            apply_gamescope_cli_override(&mut spec.gamescope, gamescope, no_gamescope);
             let status = launch::run_umu(&config, &spec)?;
             Ok(status_to_code(status))
         }
@@ -149,6 +167,8 @@ fn try_main() -> Result<ExitCode, Error> {
             graphics,
             log_level,
             no_sanitize_vulkan,
+            gamescope,
+            no_gamescope,
         } => {
             if let Some(ref loc) = locale {
                 if locale::find(loc).is_none() {
@@ -184,6 +204,8 @@ fn try_main() -> Result<ExitCode, Error> {
                     .unwrap_or(&config.launch.log_level),
             );
             let sanitize_vulkan = config.launch.sanitize_vulkan && !no_sanitize_vulkan;
+            let mut gs = config.launch.gamescope.clone();
+            apply_gamescope_cli_override(&mut gs, gamescope, no_gamescope);
             let spec = launch::LaunchSpec {
                 exe,
                 args,
@@ -195,6 +217,7 @@ fn try_main() -> Result<ExitCode, Error> {
                 sanitize_vulkan,
                 graphics: gfx.to_string(),
                 log_level: level.to_string(),
+                gamescope: gs,
                 env: launch::merge_launch_env(
                     &config,
                     locale.as_deref(),
@@ -217,11 +240,17 @@ fn try_main() -> Result<ExitCode, Error> {
                 );
                 for (id, e) in &db.apps {
                     let loc = e.locale.as_deref().unwrap_or("-");
+                    // Flag dangling bottles so CLI list matches TUI red rows.
+                    let pfx = if paths.prefix_path(&e.prefix).is_dir() {
+                        e.prefix.clone()
+                    } else {
+                        format!("{}!", e.prefix)
+                    };
                     println!(
                         "{:<18} {:<18} {:<10} {:<8} {}",
                         id,
                         e.name,
-                        e.prefix,
+                        pfx,
                         loc,
                         e.exe.display()
                     );
@@ -332,6 +361,21 @@ fn try_main() -> Result<ExitCode, Error> {
                 println!("created {}", path.display());
                 Ok(ExitCode::SUCCESS)
             }
+            PrefixCmd::Remove { id, force } => {
+                let db = AppsDb::load(&paths)?;
+                match delete_prefix(&paths, &db, &id, force)? {
+                    DeletePrefixOutcome::Removed(path) => {
+                        println!("removed prefix `{id}`  ({})", path.display());
+                    }
+                    DeletePrefixOutcome::AlreadyGone(path) => {
+                        println!(
+                            "prefix `{id}` already gone  ({})",
+                            path.display()
+                        );
+                    }
+                }
+                Ok(ExitCode::SUCCESS)
+            }
             PrefixCmd::Path { id } => {
                 println!("{}", paths.prefix_path(&id).display());
                 Ok(ExitCode::SUCCESS)
@@ -361,6 +405,18 @@ fn try_main() -> Result<ExitCode, Error> {
                 "log_level  : {} (quiet hides umu/Proton/Wine terminal output)",
                 normalize_log_level(&config.launch.log_level)
             );
+            let gs = &config.launch.gamescope;
+            println!(
+                "gamescope  : {} (config.launch.gamescope; default off)",
+                gs.status_label()
+            );
+            match launch::resolve_gamescope(gs) {
+                Ok(p) => println!("  binary  : {}", p.display()),
+                Err(_) if gs.enabled => {
+                    println!("  binary  : MISSING (install gamescope or set command=)")
+                }
+                Err(_) => println!("  binary  : (not required while disabled)"),
+            }
             println!(
                 "default prefix (STEAM_COMPAT_DATA_PATH): {} (id=`{}`)",
                 paths.prefix_path(&config.default_prefix).display(),
@@ -404,12 +460,33 @@ fn try_main() -> Result<ExitCode, Error> {
                     normalize_graphics(&config.launch.graphics)
                 ),
             }
+            match entry.gamescope {
+                Some(true) => println!("gamescope: on (per-app)"),
+                Some(false) => println!("gamescope: off (per-app)"),
+                None => println!(
+                    "gamescope: (inherit global `{}`)",
+                    config.launch.gamescope.status_label()
+                ),
+            }
             match proton::resolve_proton_path(&paths, &config.proton, &entry.proton) {
                 Ok(p) => println!("proton  : {}", p.display()),
                 Err(_) => println!("proton  : (unresolved: {})", entry.proton),
             }
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+/// Apply one-shot `--gamescope` / `--no-gamescope` on top of resolved config.
+fn apply_gamescope_cli_override(
+    gs: &mut crate::config::GamescopeConfig,
+    force_on: bool,
+    force_off: bool,
+) {
+    if force_on {
+        gs.enabled = true;
+    } else if force_off {
+        gs.enabled = false;
     }
 }
 

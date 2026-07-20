@@ -63,12 +63,24 @@ pub enum Commands {
         /// Per-app D3D backend (`dxvk`, `wined3d`). Omit to inherit `config.launch.graphics`.
         #[arg(long)]
         graphics: Option<String>,
+        /// Enable gamescope wrap for this app (overrides `[launch.gamescope].enabled`)
+        #[arg(long, overrides_with = "no_gamescope")]
+        gamescope: bool,
+        /// Disable gamescope wrap for this app (overrides global when global is on)
+        #[arg(long, overrides_with = "gamescope")]
+        no_gamescope: bool,
     },
 
     /// Launch a registered app (used by .desktop shortcuts)
     Launch {
         /// App id
         id: String,
+        /// Force gamescope wrap for this launch (overrides app/global enabled flag)
+        #[arg(long, overrides_with = "no_gamescope")]
+        gamescope: bool,
+        /// Disable gamescope wrap for this launch
+        #[arg(long, overrides_with = "gamescope")]
+        no_gamescope: bool,
     },
 
     /// Run an exe once without registering
@@ -102,6 +114,12 @@ pub enum Commands {
         /// Keep host `VK_ICD_FILENAMES` / `VK_DRIVER_FILES` (default: strip like Steam/Lutris).
         #[arg(long)]
         no_sanitize_vulkan: bool,
+        /// Force gamescope wrap for this run (uses `[launch.gamescope]` flags)
+        #[arg(long, overrides_with = "no_gamescope")]
+        gamescope: bool,
+        /// Disable gamescope wrap for this run
+        #[arg(long, overrides_with = "gamescope")]
+        no_gamescope: bool,
     },
 
     /// List registered apps
@@ -179,6 +197,14 @@ pub enum PrefixCmd {
     Create {
         /// Prefix id (`default` or a slug → ~/.protoncli/prefixes/<id>)
         id: String,
+    },
+    /// Delete a managed prefix directory (`default` is never removed)
+    Remove {
+        /// Prefix id (relative slug under ~/.protoncli/prefixes/<id>)
+        id: String,
+        /// Delete even if registered apps still reference this prefix
+        #[arg(long)]
+        force: bool,
     },
     /// Print resolved path for a prefix id
     Path {

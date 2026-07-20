@@ -18,11 +18,27 @@ pub enum Error {
     #[error("unknown log level `{0}` (known: quiet, normal, verbose)")]
     UnknownLogLevel(String),
 
+    #[error(
+        "gamescope not found (install gamescope, or set [launch.gamescope].command; see `protoncli doctor`)"
+    )]
+    GamescopeNotFound,
+
     #[error("app `{0}` already exists")]
     AppExists(String),
 
     #[error("app `{0}` not found")]
     AppNotFound(String),
+
+    #[error("refusing to delete shared default prefix (id=`default`)")]
+    PrefixIsDefault,
+
+    #[error(
+        "prefix `{id}` is used by apps: {apps} (pass --force to delete anyway)"
+    )]
+    PrefixInUse { id: String, apps: String },
+
+    #[error("refusing to delete absolute prefix path `{0}` (only managed relative ids)")]
+    PrefixAbsolutePath(String),
 
     #[error("exe not found: {0}")]
     ExeNotFound(PathBuf),

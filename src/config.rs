@@ -56,7 +56,8 @@ impl Default for Config {
 
 /// Global launch behaviour (Steam/Lutris-like defaults).
 ///
-/// Per-app overrides live on [`crate::apps::AppEntry`] (`locale`, `graphics`, env).
+/// Per-app overrides live on [`crate::apps::AppEntry`] (`locale`, `graphics`,
+/// `gamescope`, env).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaunchConfig {
@@ -75,6 +76,13 @@ pub struct LaunchConfig {
     /// - `"normal"` — inherit streams (default; current pre-setting behaviour)
     /// - `"verbose"` — inherit + extra protoncli launch diagnostics
     pub log_level: String,
+    /// Optional [gamescope](https://github.com/ValveSoftware/gamescope) wrapper.
+    ///
+    /// Default is off. When enabled, launches become
+    /// `gamescope [flags…] -- <umu|steam+proton> …` so exclusive-fullscreen titles
+    /// get a single nested display (multi-monitor friendly; real FS still works
+    /// via `-f` / `--force-windows-fullscreen`).
+    pub gamescope: GamescopeConfig,
     /// Default environment variables for every launch.
     ///
     /// Applied after locale / graphics env; per-app custom env can override keys.
@@ -91,7 +99,121 @@ impl Default for LaunchConfig {
             // Default stays "noisy" so upgrades and first-time installs keep
             // failure output visible; quiet is an explicit player choice.
             log_level: "normal".into(),
+            gamescope: GamescopeConfig::default(),
             env: builtin_launch_env(),
+        }
+    }
+}
+
+/// Wrap the game process in gamescope (nested compositor).
+///
+/// Kept as its own table so legacy configs without `[launch.gamescope]` stay
+/// disabled and gain sensible fullscreen defaults when the user opts in.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GamescopeConfig {
+    /// Master switch. Default **false** so everyday launches stay plain umu/Proton.
+    pub enabled: bool,
+    /// Binary name or absolute path. `None` → `gamescope` on `PATH`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Pass `-f` so gamescope itself is host-fullscreen (default true when used).
+    pub fullscreen: bool,
+    /// Pass `-b` (borderless nested window). Useful without host fullscreen.
+    pub borderless: bool,
+    /// Pass `--force-windows-fullscreen` so exclusive-FS games fill the nested
+    /// display instead of a tiny letterboxed client. Default true.
+    pub force_windows_fullscreen: bool,
+    /// Optional host output width (`-W`). `None` → gamescope picks display size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<u32>,
+    /// Optional host output height (`-H`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<u32>,
+    /// Optional nested (game) width (`-w`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_width: Option<u32>,
+    /// Optional nested (game) height (`-h`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub nested_height: Option<u32>,
+    /// Extra argv inserted before `--` (e.g. `["-S", "integer", "--adaptive-sync"]`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extra_args: Vec<String>,
+}
+
+impl Default for GamescopeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            command: None,
+            // When the user turns gamescope on, they almost always want real FS.
+            fullscreen: true,
+            borderless: false,
+            // Without this, many exclusive-FS titles stay a small window inside
+            // gamescope; black “frames” / letterbox glitches are common on dual
+            // monitors with bare Proton exclusive mode.
+            force_windows_fullscreen: true,
+            width: None,
+            height: None,
+            nested_width: None,
+            nested_height: None,
+            extra_args: Vec::new(),
+        }
+    }
+}
+
+impl GamescopeConfig {
+    /// Argv for gamescope **before** the `--` separator (no binary name).
+    pub fn build_args(&self) -> Vec<String> {
+        let mut args = Vec::new();
+        if self.fullscreen {
+            args.push("-f".into());
+        }
+        if self.borderless {
+            args.push("-b".into());
+        }
+        if self.force_windows_fullscreen {
+            args.push("--force-windows-fullscreen".into());
+        }
+        if let Some(w) = self.width {
+            args.push("-W".into());
+            args.push(w.to_string());
+        }
+        if let Some(h) = self.height {
+            args.push("-H".into());
+            args.push(h.to_string());
+        }
+        if let Some(w) = self.nested_width {
+            args.push("-w".into());
+            args.push(w.to_string());
+        }
+        if let Some(h) = self.nested_height {
+            args.push("-h".into());
+            args.push(h.to_string());
+        }
+        args.extend(self.extra_args.iter().cloned());
+        args
+    }
+
+    /// Short label for TUI / doctor (`off` or `on (-f …)`).
+    pub fn status_label(&self) -> String {
+        if !self.enabled {
+            return "off".into();
+        }
+        let mut flags = Vec::new();
+        if self.fullscreen {
+            flags.push("-f");
+        }
+        if self.borderless {
+            flags.push("-b");
+        }
+        if self.force_windows_fullscreen {
+            flags.push("--force-windows-fullscreen");
+        }
+        if flags.is_empty() {
+            "on".into()
+        } else {
+            format!("on ({})", flags.join(" "))
         }
     }
 }
@@ -356,5 +478,77 @@ log_level = "normal"
         assert_eq!(next_log_level("quiet"), "normal");
         assert_eq!(next_log_level("normal"), "verbose");
         assert_eq!(next_log_level("verbose"), "quiet");
+    }
+
+    #[test]
+    fn gamescope_defaults_and_args() {
+        let g = GamescopeConfig::default();
+        assert!(!g.enabled);
+        assert!(g.fullscreen);
+        assert!(g.force_windows_fullscreen);
+        assert!(!g.borderless);
+        // build_args still emit flags even when disabled — caller gates on enabled.
+        let args = g.build_args();
+        assert!(args.iter().any(|a| a == "-f"));
+        assert!(args.iter().any(|a| a == "--force-windows-fullscreen"));
+        assert!(!args.iter().any(|a| a == "-b"));
+
+        let mut custom = GamescopeConfig::default();
+        custom.enabled = true;
+        custom.fullscreen = false;
+        custom.borderless = true;
+        custom.force_windows_fullscreen = false;
+        custom.width = Some(2560);
+        custom.height = Some(1440);
+        custom.nested_width = Some(1280);
+        custom.nested_height = Some(720);
+        custom.extra_args = vec!["-S".into(), "integer".into()];
+        assert_eq!(
+            custom.build_args(),
+            vec!["-b", "-W", "2560", "-H", "1440", "-w", "1280", "-h", "720", "-S", "integer"]
+        );
+        assert_eq!(GamescopeConfig::default().status_label(), "off");
+        assert!(custom.status_label().starts_with("on"));
+    }
+
+    #[test]
+    fn gamescope_legacy_config_loads_disabled() {
+        let dir = tempdir().unwrap();
+        let root = dir.path().join(".protoncli");
+        let paths = Paths {
+            root: root.clone(),
+            config_dir: root.clone(),
+            data_dir: root.clone(),
+            config_file: root.join("config.toml"),
+            apps_file: root.join("apps.toml"),
+            prefixes_dir: root.join("prefixes"),
+            default_prefix: root.join("default"),
+            runtimes_dir: root.join("runtimes"),
+            icons_dir: root.join("icons"),
+            applications_dir: dir.path().join("applications"),
+        };
+        paths.ensure_dirs().unwrap();
+        fs::write(
+            &paths.config_file,
+            r#"
+default_prefix = "default"
+[proton]
+default = "dwproton"
+prefer = "managed"
+[umu]
+[desktop]
+create_on_add = true
+categories = ["Game"]
+[launch]
+sanitize_vulkan = true
+graphics = "dxvk"
+log_level = "normal"
+"#,
+        )
+        .unwrap();
+        let cfg = Config::load(&paths).unwrap();
+        assert!(!cfg.launch.gamescope.enabled);
+        assert!(cfg.launch.gamescope.fullscreen);
+        assert!(cfg.launch.gamescope.force_windows_fullscreen);
     }
 }

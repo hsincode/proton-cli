@@ -10,7 +10,7 @@ use std::process::{Command, ExitStatus, Stdio};
 use which::which;
 
 use crate::apps::AppEntry;
-use crate::config::{self, Config, UmuConfig};
+use crate::config::{self, Config, GamescopeConfig, UmuConfig};
 use crate::error::{Error, Result};
 use crate::locale;
 use crate::paths::Paths;
@@ -117,6 +117,8 @@ pub struct LaunchSpec {
     pub graphics: String,
     /// Effective terminal log level (`quiet` / `normal` / `verbose`).
     pub log_level: String,
+    /// Effective gamescope wrap (global defaults + optional per-app `enabled` override).
+    pub gamescope: GamescopeConfig,
     pub env: Vec<(String, String)>,
 }
 
@@ -137,6 +139,7 @@ impl LaunchSpec {
             sanitize_vulkan: config.launch.sanitize_vulkan,
             graphics: graphics.to_string(),
             log_level: log_level.to_string(),
+            gamescope: effective_gamescope(entry.gamescope, &config.launch.gamescope),
             // Locale → graphics → global [launch.env] → (optional) per-app env.
             env: merge_launch_env(
                 config,
@@ -165,6 +168,64 @@ pub fn app_env_extra(entry: &AppEntry) -> Vec<(String, String)> {
 pub fn effective_graphics<'a>(app: Option<&'a str>, global: &'a str) -> &'a str {
     let raw = app.unwrap_or(global);
     config::normalize_graphics(raw)
+}
+
+/// Resolve gamescope: clone global flags, then apply per-app `enabled` if set.
+///
+/// Width / fullscreen / extra_args always come from global `[launch.gamescope]`;
+/// only the master switch is overridable per app (so one broken exclusive-FS
+/// title can opt in without wrapping every app).
+pub fn effective_gamescope(app: Option<bool>, global: &GamescopeConfig) -> GamescopeConfig {
+    let mut g = global.clone();
+    if let Some(enabled) = app {
+        g.enabled = enabled;
+    }
+    g
+}
+
+/// Resolve `gamescope` binary from config or PATH.
+pub fn resolve_gamescope(cfg: &GamescopeConfig) -> Result<PathBuf> {
+    if let Some(cmd) = &cfg.command {
+        let p = PathBuf::from(cmd);
+        if p.is_absolute() && p.is_file() {
+            return Ok(p);
+        }
+        if let Ok(w) = which(cmd) {
+            return Ok(w);
+        }
+        return Err(Error::GamescopeNotFound);
+    }
+    which("gamescope").map_err(|_| Error::GamescopeNotFound)
+}
+
+/// Build the process that actually starts: plain backend, or `gamescope -- backend…`.
+///
+/// Env / cwd / stdio are applied by the caller after this returns so both paths
+/// share the same Steam/umu wiring.
+fn build_launch_command(
+    backend: &Path,
+    backend_args: &[impl AsRef<std::ffi::OsStr>],
+    gamescope: &GamescopeConfig,
+) -> Result<Command> {
+    if !gamescope.enabled {
+        let mut cmd = Command::new(backend);
+        cmd.args(backend_args);
+        return Ok(cmd);
+    }
+    let gs = resolve_gamescope(gamescope)?;
+    let mut cmd = Command::new(gs);
+    cmd.args(gamescope.build_args());
+    cmd.arg("--");
+    cmd.arg(backend);
+    cmd.args(backend_args);
+    Ok(cmd)
+}
+
+fn gamescope_banner(gamescope: &GamescopeConfig) -> String {
+    if !gamescope.enabled {
+        return "gamescope=off".into();
+    }
+    format!("gamescope={}", gamescope.status_label())
 }
 
 /// Env pairs for a graphics backend (`PROTON_USE_WINED3D` only for wined3d).
@@ -274,6 +335,7 @@ mod tests {
             store: "none".into(),
             locale: None,
             graphics: None,
+            gamescope: None,
             use_custom_env: false,
             env: env.clone(),
             icon: None,
@@ -316,6 +378,20 @@ mod tests {
     fn host_vulkan_icd_keys_documented() {
         assert!(HOST_VULKAN_ICD_KEYS.contains(&"VK_ICD_FILENAMES"));
         assert!(HOST_VULKAN_ICD_KEYS.contains(&"VK_DRIVER_FILES"));
+    }
+
+    #[test]
+    fn effective_gamescope_app_override() {
+        let mut global = GamescopeConfig::default();
+        global.enabled = false;
+        global.fullscreen = true;
+        assert!(!effective_gamescope(None, &global).enabled);
+        assert!(effective_gamescope(Some(true), &global).enabled);
+        assert!(!effective_gamescope(Some(false), &global).enabled);
+        // Other flags stay global.
+        let on = effective_gamescope(Some(true), &global);
+        assert!(on.fullscreen);
+        assert!(on.force_windows_fullscreen);
     }
 }
 
@@ -389,7 +465,12 @@ fn run_via_umu(umu_run: &Path, spec: &LaunchSpec) -> Result<ExitStatus> {
     // umu accepts WINEPREFIX; modern umu maps it onto STEAM_COMPAT_DATA_PATH.
     // We pass both for maximum compatibility: data path = our prefix root, wine = pfx.
     let pfx = spec.prefix.join("pfx");
-    let mut cmd = Command::new(umu_run);
+    let mut backend_args: Vec<std::ffi::OsString> = Vec::new();
+    backend_args.push(spec.exe.as_os_str().to_owned());
+    for a in &spec.args {
+        backend_args.push(a.into());
+    }
+    let mut cmd = build_launch_command(umu_run, &backend_args, &spec.gamescope)?;
     cmd.env("WINEPREFIX", &pfx);
     cmd.env("STEAM_COMPAT_DATA_PATH", &spec.prefix);
     cmd.env("PROTONPATH", &spec.proton_path);
@@ -397,19 +478,18 @@ fn run_via_umu(umu_run: &Path, spec: &LaunchSpec) -> Result<ExitStatus> {
     cmd.env("STORE", &spec.store);
     apply_common_env(&mut cmd, spec);
     apply_log_stdio(&mut cmd, &spec.log_level);
-    cmd.arg(&spec.exe);
-    cmd.args(&spec.args);
 
     log_banner(
         &spec.log_level,
         &format!(
-            "protoncli: backend=umu ({}) STEAM_COMPAT_DATA_PATH={} PROTONPATH={} graphics={} sanitize_vulkan={} log_level={}",
+            "protoncli: backend=umu ({}) STEAM_COMPAT_DATA_PATH={} PROTONPATH={} graphics={} sanitize_vulkan={} log_level={} {}",
             umu_run.display(),
             spec.prefix.display(),
             spec.proton_path.display(),
             spec.graphics,
             spec.sanitize_vulkan,
-            config::normalize_log_level(&spec.log_level)
+            config::normalize_log_level(&spec.log_level),
+            gamescope_banner(&spec.gamescope),
         ),
     );
     if config::normalize_log_level(&spec.log_level) == "verbose" {
@@ -420,6 +500,12 @@ fn run_via_umu(umu_run: &Path, spec: &LaunchSpec) -> Result<ExitStatus> {
             spec.exe.display(),
             spec.args
         );
+        if spec.gamescope.enabled {
+            eprintln!(
+                "protoncli: verbose: gamescope args = {:?}",
+                spec.gamescope.build_args()
+            );
+        }
         if !spec.env.is_empty() {
             eprintln!("protoncli: verbose: launch env = {:?}", spec.env);
         }
@@ -451,7 +537,18 @@ fn run_via_steam(
 
     if use_container {
         // Mirror Steam: runtime entry → proton waitforexitandrun → exe
-        let mut cmd = Command::new(&layout.runtime_entry);
+        // (optionally wrapped: gamescope -- runtime …)
+        let mut backend_args: Vec<std::ffi::OsString> = vec![
+            "--verb=waitforexitandrun".into(),
+            "--".into(),
+            proton_script.as_os_str().to_owned(),
+            "waitforexitandrun".into(),
+            spec.exe.as_os_str().to_owned(),
+        ];
+        for a in &spec.args {
+            backend_args.push(a.into());
+        }
+        let mut cmd = build_launch_command(&layout.runtime_entry, &backend_args, &spec.gamescope)?;
         for (k, v) in &base_env {
             cmd.env(k, v);
         }
@@ -464,24 +561,18 @@ fn run_via_steam(
         apply_common_env(&mut cmd, spec);
         apply_log_stdio(&mut cmd, &spec.log_level);
 
-        cmd.arg("--verb=waitforexitandrun");
-        cmd.arg("--");
-        cmd.arg(&proton_script);
-        cmd.arg("waitforexitandrun");
-        cmd.arg(&spec.exe);
-        cmd.args(&spec.args);
-
         log_banner(
             &spec.log_level,
             &format!(
-                "protoncli: backend=steam+{} client={} STEAM_COMPAT_DATA_PATH={} PROTON={} graphics={} sanitize_vulkan={} log_level={}",
+                "protoncli: backend=steam+{} client={} STEAM_COMPAT_DATA_PATH={} PROTON={} graphics={} sanitize_vulkan={} log_level={} {}",
                 layout.runtime_name,
                 layout.client_install.display(),
                 spec.prefix.display(),
                 spec.proton_path.display(),
                 spec.graphics,
                 spec.sanitize_vulkan,
-                config::normalize_log_level(&spec.log_level)
+                config::normalize_log_level(&spec.log_level),
+                gamescope_banner(&spec.gamescope),
             ),
         );
         if config::normalize_log_level(&spec.log_level) == "verbose" {
@@ -493,6 +584,12 @@ fn run_via_steam(
                 spec.exe.display(),
                 spec.args
             );
+            if spec.gamescope.enabled {
+                eprintln!(
+                    "protoncli: verbose: gamescope args = {:?}",
+                    spec.gamescope.build_args()
+                );
+            }
             if !spec.env.is_empty() {
                 eprintln!("protoncli: verbose: launch env = {:?}", spec.env);
             }
@@ -502,7 +599,14 @@ fn run_via_steam(
     }
 
     // Bare proton (no pressure-vessel) — last resort when SLR is missing.
-    let mut cmd = Command::new(&proton_script);
+    let mut backend_args: Vec<std::ffi::OsString> = vec![
+        "run".into(),
+        spec.exe.as_os_str().to_owned(),
+    ];
+    for a in &spec.args {
+        backend_args.push(a.into());
+    }
+    let mut cmd = build_launch_command(&proton_script, &backend_args, &spec.gamescope)?;
     for (k, v) in &base_env {
         cmd.env(k, v);
     }
@@ -513,20 +617,18 @@ fn run_via_steam(
     cmd.env("STORE", &spec.store);
     apply_common_env(&mut cmd, spec);
     apply_log_stdio(&mut cmd, &spec.log_level);
-    cmd.arg("run");
-    cmd.arg(&spec.exe);
-    cmd.args(&spec.args);
 
     log_banner(
         &spec.log_level,
         &format!(
-            "protoncli: backend=steam-bare (no SLR container) client={} STEAM_COMPAT_DATA_PATH={} PROTON={} graphics={} sanitize_vulkan={} log_level={}",
+            "protoncli: backend=steam-bare (no SLR container) client={} STEAM_COMPAT_DATA_PATH={} PROTON={} graphics={} sanitize_vulkan={} log_level={} {}",
             layout.client_install.display(),
             spec.prefix.display(),
             spec.proton_path.display(),
             spec.graphics,
             spec.sanitize_vulkan,
-            config::normalize_log_level(&spec.log_level)
+            config::normalize_log_level(&spec.log_level),
+            gamescope_banner(&spec.gamescope),
         ),
     );
     // Setup problem (missing SLR), not game chatter — always surface once.

@@ -145,6 +145,8 @@ protoncli add --name "B" --exe ./B.exe --prefix my-b-prefix
 protoncli prefix list
 protoncli prefix create indie-game
 protoncli prefix path default
+# 未使用 bottle を消す（default は削除不可。参照中は --force）
+protoncli prefix remove orphan-game
 ```
 
 ---
@@ -182,11 +184,11 @@ protoncli tui
 | 画面 | 内容 |
 |------|------|
 | **Locale**（初回） | 起動ロケール選択（日本語 / English）。`config.locale` 未設定時に必ず表示 |
-| Apps | 一覧・起動・削除（prefix は保持）。**`o`** でアプリ個別 **exe** / locale / graphics |
-| Register app | name / exe / id / prefix / proton（locale・exe は登録後に設定可） |
-| Wine prefixes | 一覧・`pfx-N` 作成・設定の default 変更 |
+| Apps | 一覧・起動・削除（prefix は保持）。**`o`** でアプリ個別 **exe** / locale / graphics。**prefix ディレクトリが無い行は赤 + `[NO PREFIX]`** |
+| Register app | **Name/Id** 文字入力（点滅カーソル）· **Exe** 内蔵ピッカー（dirs+.exe）· **Prefix** default/auto/custom（Enter 切替）· **Proton** 検出一覧から選択 |
+| Wine prefixes | 一覧・`pfx-N` 作成・**`d` 削除**（`default` 不可・参照中は拒否）・設定の default 変更 |
 | Proton settings | dwproton インストール、prefer managed / steam |
-| Launch settings | グローバル **locale** / **graphics** (dxvk\|wined3d) / **sanitize_vulkan** / **log_level** |
+| Launch settings | グローバル **locale** / **graphics** (dxvk\|wined3d) / **sanitize_vulkan** / **log_level** / **gamescope** |
 | Doctor | umu・PROTONPATH・パス確認 |
 
 各画面のタイトル／status にキー操作のヒントがあります（`↑↓` `Enter` `Esc` など）。
@@ -215,8 +217,8 @@ CLI から本編を最初から登録するなら、従来どおり `add --exe /
 | `add --exe [--name] [--prefix]` | 登録 + 既定で `.desktop`（`--name` 省略時は exe stem） |
 | `launch <id>` | 登録アプリを起動 |
 | `run <exe>` | 未登録のワンショット起動 |
-| `list` / `remove` | アプリ管理 |
-| `prefix list\|create\|path` | `~/.protoncli` の prefix 管理 |
+| `list` / `remove` | アプリ管理（`list` の PREFIX 列は欠落時に `id!`） |
+| `prefix list\|create\|remove\|path` | `~/.protoncli` の prefix 管理（`remove` は `default` 不可、参照中は `--force`） |
 | `desktop install\|uninstall` | アプリメニュー用ショートカット |
 | `proton install\|list` | dwproton 取得 / 検出一覧 |
 | `doctor` / `path <id>` | 診断・パス表示 |
@@ -247,6 +249,16 @@ graphics = "dxvk"
 # quiet は umu / Proton / Wine の stdout・stderr を捨てる（日々のプレイ向け）
 # log_level = "quiet"
 
+# gamescope ラップ（既定オフ）。排他フルスクリーンやマルチモニタで崩れやすいタイトル向け。
+# 有効時: gamescope -f --force-windows-fullscreen -- <umu|steam+proton> …
+# [launch.gamescope]
+# enabled = false
+# fullscreen = true                 # -f（ホスト側フルスクリーン）
+# force_windows_fullscreen = true   # ネスト内の排他 FS を出力いっぱいに広げる
+# # width = 2560                    # 任意: -W / -H / -w / -h
+# # height = 1440
+# # extra_args = ["-S", "integer"]
+
 # 全アプリ共通の起動環境変数（未記載時は下記ビルトインが使われる）
 # dwproton は未設定だと DXVK_HUD=compiler を入れ「Compiling shaders...」を出すため 0 で消す
 [launch.env]
@@ -271,8 +283,15 @@ categories = ["Game"]
   - **quiet** … 子プロセス（umu/Proton/Wine）の stdout/stderr を捨て、protoncli のバナーも出さない
   - **normal** … 従来どおり子の出力を端末に出す（既定）
   - **verbose** … normal に加え protoncli 側の起動診断を追加
+- `[launch.gamescope]` … **既定オフ**。有効にすると `gamescope [flags…] -- <backend>` でラップ（フルスクリーン可）
+  - `enabled` … マスタースイッチ（既定 `false`）
+  - `fullscreen` … `-f`（既定 `true`）
+  - `force_windows_fullscreen` … ネスト内の排他 FS を埋める（既定 `true`）
+  - `width` / `height` / `nested_width` / `nested_height` / `extra_args` / `command` … 任意
+  - CLI: `launch <id> --gamescope` / `--no-gamescope`、`run … --gamescope`
+  - アプリ個別: `apps.toml` の `gamescope = true|false`、または TUI Apps → **o** → Gamescope、`add --gamescope`
 - `[launch.env]` … 全起動に付与する環境変数。未記載時は `DXVK_HUD=0` / `STEAMOS=1` / `UMU_USE_STEAM=1`。TUI Home → **Environment variables** で編集・ビルトインへリセット可
-- アプリ個別: `apps.toml` の `locale` / `graphics` / `use_custom_env` + `env`、TUI の Apps → **`o` または `e`**、または `add --locale ja --graphics dxvk` / `run --locale en --graphics wined3d`
+- アプリ個別: `apps.toml` の `locale` / `graphics` / `gamescope` / `use_custom_env` + `env`、TUI の Apps → **`o` または `e`**、または `add --locale ja --graphics dxvk` / `run --locale en --graphics wined3d`
   - **env モード default**（既定）… グローバル `[launch.env]` のみ
   - **env モード custom** … グローバル既定の**上に**アプリ `env` を追加（同じキーは上書き）
 - 優先順位（env キーごと）: **アプリ custom env > グローバル `[launch.env]` > アプリ locale/graphics 由来 > （それ以外）**
@@ -283,6 +302,7 @@ categories = ["Game"]
 
 ```
 protoncli launch <id>
+  → (optional) gamescope -f --force-windows-fullscreen --
   → WINEPREFIX=~/.protoncli/…  PROTONPATH=…  GAMEID=…
   → umu-run /path/to/game.exe
 ```

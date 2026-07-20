@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+## 0.1.5
+
+- **`[launch.gamescope]`**（既定 **off**）: 起動を `gamescope [flags…] -- <umu|steam+proton>` でラップ。既定フラグは `-f` + `--force-windows-fullscreen`（ホスト FS とネスト内排他 FS を両立）。
+  - CLI: `launch` / `run` の `--gamescope` / `--no-gamescope`、`add --gamescope` / `--no-gamescope`
+  - アプリ個別: `apps.toml` の `gamescope = true|false`（TUI Apps → o → Gamescope）
+  - TUI Launch settings でグローバル on/off、`doctor` に状態表示
+- **`protoncli prefix remove <id>`**（CLI）: managed wineprefix を削除。`default` は常に拒否。他アプリが参照中は拒否、**`--force`** で参照中もディレクトリのみ削除（`apps.toml` は触らない）。
+- TUI **Wine prefixes**: **`d`** で prefix 削除（`--force` 相当なし。参照中は status に理由表示）。
+- TUI **Apps**: 解決先 prefix ディレクトリが無い行を **赤** で表示し **`[NO PREFIX]`** を明示。
+- CLI **`list`**: prefix 欠落時は PREFIX 列を `id!` 表記。
+- TUI **Register app** フォーム改善:
+  - **Exe**: 内蔵ファイルピッカー（ホスト FS・dirs + `.exe` のみ）。
+  - **Proton**: 検出済みインストールのリストから選択（↑↓/jk/←→、Space で次）。
+  - **Prefix**: `default` / `auto`（app id と同 slug）/ `custom`（文字入力、初期空）。Enter/Space で切替。
+  - 文字入力欄は背景ハイライト + **点滅カーソル**。
+
 ## 0.1.4
 
 - 既定起動 env: `DXVK_HUD=0` / `STEAMOS=1` / `UMU_USE_STEAM=1`（`[launch.env]`、未記載時はビルトイン）。
