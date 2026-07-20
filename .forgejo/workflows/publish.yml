@@ -1,0 +1,89 @@
+name: Publish
+
+# v* タグの push、または手動実行で crates.io 公開 + Codeberg Release 作成
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'リリースタグ（例: v0.1.0）。既存タグが対象。'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  crates-io:
+    runs-on: self-hosted
+    steps:
+      - name: Checkout
+        uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Rust toolchain
+        run: |
+          set -euo pipefail
+          if ! command -v rustc >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+            # shellcheck disable=SC1091
+            . "$HOME/.cargo/env"
+          fi
+          rustc --version
+          cargo --version
+
+      - name: Test
+        run: |
+          set -euo pipefail
+          export PATH="${HOME}/.cargo/bin:${PATH}"
+          cargo test --locked
+
+      - name: Publish to crates.io
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -euo pipefail
+          export PATH="${HOME}/.cargo/bin:${PATH}"
+          if [ -z "${CARGO_REGISTRY_TOKEN:-}" ]; then
+            echo "::error::Repository secret CARGO_REGISTRY_TOKEN is not set"
+            exit 1
+          fi
+          # Idempotent-ish: fail with clear message if version already published
+          cargo publish --locked --token "${CARGO_REGISTRY_TOKEN}"
+
+  forgejo-release:
+    needs: crates-io
+    runs-on: self-hosted
+    steps:
+      - name: Create Forgejo Release
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          API_BASE="${GITHUB_SERVER_URL}/api/v1/repos/${GITHUB_REPOSITORY}"
+          AUTH="Authorization: token ${GITHUB_TOKEN}"
+
+          jsonext() {
+            node -e "let d='';process.stdin.on('data',c=>d+=c);process.stdin.on('end',()=>{try{const o=JSON.parse(d);console.log(o[process.argv[1]]??'')}catch(e){console.log('')}})" "$1"
+          }
+
+          RELEASE_ID=$(curl -s -H "${AUTH}" "${API_BASE}/releases/tags/${TAG}" | jsonext id || true)
+
+          if [ -z "${RELEASE_ID}" ] || [ "${RELEASE_ID}" = "null" ]; then
+            echo "==> Creating release ${TAG}"
+            BODY=$(printf '%s' "{\"tag_name\":\"${TAG}\",\"name\":\"proton-cli ${TAG}\",\"body\":\"Published to crates.io as proton-cli. Install: cargo install proton-cli\",\"generate_release_notes\":true}")
+            CREATE_JSON=$(curl -s -H "${AUTH}" -H "Content-Type: application/json" -X POST \
+              "${API_BASE}/releases" -d "${BODY}")
+            RELEASE_ID=$(printf '%s' "${CREATE_JSON}" | jsonext id)
+            if [ -z "${RELEASE_ID}" ] || [ "${RELEASE_ID}" = "null" ]; then
+              echo "::error::Failed to create release"
+              echo "${CREATE_JSON}"
+              exit 1
+            fi
+          else
+            echo "==> Release already exists (id=${RELEASE_ID})"
+          fi
+          echo "release_id=${RELEASE_ID}"
