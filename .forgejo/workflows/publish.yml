@@ -51,6 +51,7 @@ jobs:
             exit 1
           fi
           # Idempotent-ish: fail with clear message if version already published
+          # Package name on crates.io is `protoncli` (binary remains proton-cli)
           cargo publish --locked --token "${CARGO_REGISTRY_TOKEN}"
 
   forgejo-release:

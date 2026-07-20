@@ -64,9 +64,15 @@ proton-cli proton install
 
 ## インストール（proton-cli 本体）
 
+crates.io の **パッケージ名は `protoncli`** です（`proton-cli` は既存クレートに取られているため）。  
+インストール後の **コマンド名は `proton-cli`** のままです。
+
 ```bash
-# crates.io（公開後）
-cargo install proton-cli
+# crates.io
+cargo install protoncli
+
+# Git（Codeberg）
+cargo install --git https://codeberg.org/xuanling/proton-cli.git
 
 # ソースから
 cargo install --path .
@@ -250,6 +256,14 @@ proton-cli launch <id>
 | Steam | **任意**（Proton 流用・`prefer=steam` 時） |
 | アプリメニュー用 DE | 任意 |
 | winetricks 等 | 任意 |
+
+### crates.io パッケージ名
+
+| 項目 | 値 |
+|------|-----|
+| package | **`protoncli`**（`cargo install protoncli`） |
+| バイナリ | **`proton-cli`** |
+| リポジトリ | https://codeberg.org/xuanling/proton-cli |
 
 ---
 

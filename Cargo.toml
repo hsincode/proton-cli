@@ -1,5 +1,6 @@
 [package]
-name = "proton-cli"
+# crates.io の package 名（`proton-cli` は 0.0.0 スタブに占有されているため protoncli）
+name = "protoncli"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.80"
@@ -14,6 +15,7 @@ authors = ["xuanling"]
 exclude = [".git*", "target/"]
 
 [[bin]]
+# インストール後のコマンド名は従来どおり proton-cli
 name = "proton-cli"
 path = "src/main.rs"
 

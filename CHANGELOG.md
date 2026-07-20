@@ -7,3 +7,4 @@
 - `add`/`run` default prefix is `default` (configurable via `default_prefix`).
 - No-args / `tui` command: minimal setup TUI (apps, register, prefixes, proton, doctor).
 - `prefix list|create|path` subcommands.
+- crates.io package name: **`protoncli`** (binary: `proton-cli`).
