@@ -17,6 +17,8 @@ pub struct DoctorReport {
     pub protons: Vec<proton::ProtonInstall>,
     pub default_proton: Option<PathBuf>,
     pub proton_cli_on_path: bool,
+    /// Path to a leftover `proton-cli` binary (renamed to `protoncli` in 0.1.3).
+    pub obsolete_proton_cli: Option<PathBuf>,
 }
 
 pub enum UmuStatus {
@@ -61,6 +63,8 @@ pub fn run_doctor(paths: &Paths, config: &Config) -> DoctorReport {
         proton::resolve_proton_path(paths, &config.proton, &config.proton.default).ok();
 
     let proton_cli_on_path = which::which("protoncli").is_ok();
+    // Pre-0.1.3 binary name; if still present it never receives `make install` updates.
+    let obsolete_proton_cli = which::which("proton-cli").ok();
 
     DoctorReport {
         config_path: paths.config_dir.clone(),
@@ -71,11 +75,13 @@ pub fn run_doctor(paths: &Paths, config: &Config) -> DoctorReport {
         protons,
         default_proton,
         proton_cli_on_path,
+        obsolete_proton_cli,
     }
 }
 
 pub fn print_report(report: &DoctorReport) {
-    println!("protoncli doctor");
+    // Version of *this* process so a stale PATH binary is easy to spot after upgrades.
+    println!("protoncli doctor v{}", env!("CARGO_PKG_VERSION"));
     println!("-----------------");
     println!("root       : {}", report.data_path.display());
     println!(
@@ -169,11 +175,25 @@ pub fn print_report(report: &DoctorReport) {
     }
 
     if report.proton_cli_on_path {
-        println!("PATH       : protoncli found (desktop shortcuts will work)");
+        // Resolve again so users see the exact path desktop shortcuts will exec.
+        match which::which("protoncli") {
+            Ok(p) => println!("PATH       : protoncli → {}", p.display()),
+            Err(_) => println!("PATH       : protoncli found (desktop shortcuts will work)"),
+        }
     } else {
         println!("PATH       : protoncli NOT on PATH");
         println!("  Desktop shortcuts use `Exec=protoncli launch <id>`.");
         println!("  Ensure `~/.cargo/bin` (or install prefix) is on PATH.");
+    }
+
+    if let Some(old) = &report.obsolete_proton_cli {
+        println!("obsolete   : proton-cli still present ({})", old.display());
+        println!("  0.1.3 でコマンド名が protoncli に変わりました。");
+        println!("  `make install` は protoncli だけ更新するため、古い proton-cli は古いまま残ります。");
+        println!(
+            "  削除: rm -f {}  または make install（掃除込み）",
+            old.display()
+        );
     }
 
     println!();

@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.1.6
+
+- TUI **ライトテーマ向け可読性**: 本文を `Color::White` 固定から端末デフォルト前景色へ。警告/アクセントは Bold、入力フォーカス値は黄 on 暗灰でコントラスト確保。
+- TUI **Exe ブラウザ**: 長い一覧を `ListState` でスクロール表示（選択行が常に可視）。位置表示 `n/total`。
+- **`doctor`**: バージョン表示、PATH 上の `protoncli` 実パス、旧名 `proton-cli` 残存の警告。
+- **`make install`**: 旧 `proton-cli` バイナリ掃除、PATH 解決結果の明示、古い `.desktop` の警告。
+
 ## 0.1.5
 
 - **`[launch.gamescope]`**（既定 **off**）: 起動を `gamescope [flags…] -- <umu|steam+proton>` でラップ。既定フラグは `-f` + `--force-windows-fullscreen`（ホスト FS とネスト内排他 FS を両立）。

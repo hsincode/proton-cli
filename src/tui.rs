@@ -60,8 +60,16 @@ const EXE_MODE_LEN: usize = 2;
 /// First row on AppEnv is the Default/Custom mode toggle; env pairs follow.
 const APP_ENV_MODE_ROW: usize = 0;
 
-// --- palette (subtle; readable on dark and light-ish terminals) ------------
+// --- palette ----------------------------------------------------------------
+// Body text inherits the terminal default foreground so light *and* dark
+// themes stay readable. Never use Color::White as text-only (invisible on
+// light backgrounds). Selection / focus use fg+bg pairs for contrast that
+// does not depend on the terminal theme.
 
+/// Primary body text — terminal default fg (works on light and dark).
+fn s_text() -> Style {
+    Style::default()
+}
 fn s_title() -> Style {
     Style::default()
         .fg(Color::Cyan)
@@ -73,6 +81,8 @@ fn s_screen() -> Style {
         .add_modifier(Modifier::BOLD)
 }
 fn s_dim() -> Style {
+    // DarkGray is dark enough on light themes and still secondary on dark.
+    // Modifier::DIM alone is unreliable across terminals.
     Style::default().fg(Color::DarkGray)
 }
 fn s_hint() -> Style {
@@ -82,10 +92,15 @@ fn s_ok() -> Style {
     Style::default().fg(Color::Green)
 }
 fn s_warn() -> Style {
-    Style::default().fg(Color::Yellow)
+    // Bold helps yellow survive light backgrounds (bright yellow-on-white is weak).
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
 }
 fn s_accent() -> Style {
-    Style::default().fg(Color::Yellow)
+    Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD)
 }
 fn s_sel() -> Style {
     Style::default()
@@ -108,6 +123,7 @@ fn s_border_warn() -> Style {
     Style::default().fg(Color::Magenta)
 }
 fn s_field_active() -> Style {
+    // Black-on-yellow is high-contrast on both light and dark backgrounds.
     Style::default()
         .fg(Color::Black)
         .bg(Color::Yellow)
@@ -115,6 +131,13 @@ fn s_field_active() -> Style {
 }
 fn s_field_idle() -> Style {
     Style::default().fg(Color::Gray)
+}
+/// Focused editable value: yellow on dark-gray island (readable on light themes).
+fn s_focus_value() -> Style {
+    Style::default()
+        .fg(Color::Yellow)
+        .bg(Color::DarkGray)
+        .add_modifier(Modifier::BOLD)
 }
 fn s_quit() -> Style {
     Style::default().fg(Color::Red)
@@ -2465,7 +2488,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     } else if is_quit {
                         s_quit()
                     } else {
-                        Style::default().fg(Color::White)
+                        s_text()
                     };
                     let prefix = if selected { "> " } else { "  " };
                     ListItem::new(Span::styled(format!("{prefix}{label}"), style))
@@ -2577,7 +2600,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                     } else if line.starts_with("  [") {
                         s_dim()
                     } else {
-                        Style::default().fg(Color::White)
+                        s_text()
                     };
                     Line::from(Span::styled(line.clone(), style))
                 })
@@ -2619,7 +2642,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     {
         s_ok()
     } else {
-        Style::default().fg(Color::White)
+        s_text()
     };
     let status = Paragraph::new(Span::styled(app.status.clone(), status_style)).block(
         Block::default()
@@ -2658,17 +2681,11 @@ fn ui_add_app(f: &mut ratatui::Frame, app: &App, area: Rect) {
             } else {
                 s_field_idle()
             };
-            let val_s = if active && typing {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
-                    .bg(Color::DarkGray)
-            } else if active {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+            // Focused values use a dark-gray island so yellow stays readable on light themes.
+            let val_s = if active {
+                s_focus_value()
             } else {
-                Style::default().fg(Color::White)
+                s_text()
             };
             // Empty inactive fields show a placeholder; active empty fields rely on the blink caret.
             let display = if value.is_empty() && !active {
@@ -2700,7 +2717,7 @@ fn ui_add_app(f: &mut ratatui::Frame, app: &App, area: Rect) {
         } else if on {
             s_active_item()
         } else if pfx_active {
-            Style::default().fg(Color::White)
+            s_text()
         } else {
             s_dim()
         };
@@ -2781,13 +2798,11 @@ fn ui_add_app(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Span::styled(
             exe_display,
             if exe_active {
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD)
+                s_focus_value()
             } else if app.add_exe.is_empty() {
                 s_dim()
             } else {
-                Style::default().fg(Color::White)
+                s_text()
             },
         ),
         if exe_active {
@@ -2845,7 +2860,7 @@ fn ui_add_app(f: &mut ratatui::Frame, app: &App, area: Rect) {
         for (i, p) in app.proton_installs.iter().enumerate() {
             let on = i == app.add_proton_sel.min(app.proton_installs.len() - 1);
             let mark = if on { "❯ " } else { "  " };
-            let style = if on { s_sel() } else { Style::default().fg(Color::White) };
+            let style = if on { s_sel() } else { s_text() };
             lines.push(Line::from(Span::styled(
                 format!("{mark}[{}] {}  {}", p.source, p.name, p.path.display()),
                 style,
@@ -2862,7 +2877,7 @@ fn ui_add_app(f: &mut ratatui::Frame, app: &App, area: Rect) {
             Some(p) => format!("    [{}] {}", p.source, p.name),
             None => format!("    {}", add_resolved_proton(app)),
         };
-        lines.push(Line::from(Span::styled(text, Style::default().fg(Color::White))));
+        lines.push(Line::from(Span::styled(text, s_text())));
     }
 
     lines.push(Line::from(""));
@@ -2972,7 +2987,7 @@ fn ui_proton_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 (true, true) => s_active_sel(),
                 (true, false) => s_active_item(),
                 (false, true) => s_sel_row(),
-                (false, false) => Style::default().fg(Color::White),
+                (false, false) => s_text(),
             };
             // Show short path parent so managed vs steam is obvious beyond the source tag.
             let path_hint = inst
@@ -3055,7 +3070,7 @@ fn ui_locale_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
             } else if i == 0 {
                 s_hint()
             } else {
-                Style::default().fg(Color::White)
+                s_text()
             };
             lines.push(Line::from(Span::styled(format!("{mark}{label}"), style)));
         }
@@ -3066,7 +3081,7 @@ fn ui_locale_picker(f: &mut ratatui::Frame, app: &App, area: Rect) {
             let style = if selected {
                 s_sel()
             } else {
-                Style::default().fg(Color::White)
+                s_text()
             };
             lines.push(Line::from(Span::styled(
                 format!(
@@ -3166,7 +3181,7 @@ fn ui_launch_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         let style = if selected {
             s_sel()
         } else {
-            Style::default().fg(Color::White)
+            s_text()
         };
         lines.push(Line::from(Span::styled(
             format!("{mark}{name:<18} {value}"),
@@ -3225,7 +3240,7 @@ fn ui_env_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
             let style = if selected {
                 s_sel()
             } else {
-                Style::default().fg(Color::White)
+                s_text()
             };
             lines.push(Line::from(Span::styled(
                 format!("{mark}{k}={v}"),
@@ -3266,13 +3281,7 @@ fn ui_env_edit(f: &mut ratatui::Frame, app: &App, area: Rect) {
         } else {
             s_field_idle()
         };
-        let val_s = if active {
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White)
-        };
+        let val_s = if active { s_focus_value() } else { s_text() };
         Line::from(vec![
             Span::styled(format!("{mark} {label}: "), label_s),
             Span::styled(value.to_string(), val_s),
@@ -3311,12 +3320,7 @@ fn ui_app_name_edit(f: &mut ratatui::Frame, app: &App, area: Rect) {
         Line::from(""),
         Line::from(vec![
             Span::styled("> Name: ", s_field_active()),
-            Span::styled(
-                app.app_settings_name.clone(),
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
-            ),
+            Span::styled(app.app_settings_name.clone(), s_focus_value()),
         ]),
         Line::from(""),
         Line::from(Span::styled("Enter save · Esc cancel", s_hint())),
@@ -3361,7 +3365,7 @@ fn ui_app_env(f: &mut ratatui::Frame, app: &App, area: Rect) {
         if mode_sel {
             s_sel()
         } else {
-            Style::default().fg(Color::White)
+            s_text()
         },
     )));
     if mode_sel {
@@ -3402,7 +3406,7 @@ fn ui_app_env(f: &mut ratatui::Frame, app: &App, area: Rect) {
                 let style = if selected {
                     s_sel()
                 } else {
-                    Style::default().fg(Color::White)
+                    s_text()
                 };
                 lines.push(Line::from(Span::styled(
                     format!("{mark}{k}={v}"),
@@ -3526,7 +3530,7 @@ fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         let style = if selected {
             s_sel()
         } else {
-            Style::default().fg(Color::White)
+            s_text()
         };
         // Exe paths are long; keep the label short and let wrap show the rest.
         lines.push(Line::from(Span::styled(
@@ -3627,7 +3631,7 @@ fn ui_exe_browse_mode(f: &mut ratatui::Frame, app: &App, area: Rect) {
         let style = if selected {
             s_sel()
         } else {
-            Style::default().fg(Color::White)
+            s_text()
         };
         lines.push(Line::from(Span::styled(
             format!("{mark}{name:<12} {value}"),
@@ -3649,13 +3653,28 @@ fn ui_exe_browse_mode(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(p, area);
 }
 
-fn ui_exe_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
+fn ui_exe_browser(f: &mut ratatui::Frame, app: &mut App, area: Rect) {
+    // Header + footer stay fixed; the middle List uses ListState so the
+    // selection always stays in the visible viewport (scrolls when needed).
+    let block = block_main("Pick exe");
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2), // path + hint
+            Constraint::Min(1),    // scrollable entries
+            Constraint::Length(1), // keys
+        ])
+        .split(inner);
+
     let mode = if app.browse_floor.is_some() {
         "wineprefix"
     } else {
         "filesystem"
     };
-    let mut lines: Vec<Line> = vec![
+    let header = Paragraph::new(vec![
         Line::from(vec![
             Span::styled(format!("[{mode}] "), s_accent()),
             Span::styled(app.browse_cwd.display().to_string(), s_ok()),
@@ -3664,57 +3683,51 @@ fn ui_exe_browser(f: &mut ratatui::Frame, app: &App, area: Rect) {
             "Only directories and .exe · Enter dir to open · Enter .exe to set",
             s_dim(),
         )),
-        Line::from(""),
-    ];
+    ]);
+    f.render_widget(header, chunks[0]);
 
     let len = app.browse_list_len();
     if len == 0 {
-        lines.push(Line::from(Span::styled(
+        let empty = Paragraph::new(Span::styled(
             "  (empty — no dirs or .exe here)",
             s_warn(),
-        )));
+        ));
+        f.render_widget(empty, chunks[1]);
     } else {
-        let sel = app.browse_state.selected();
-        for i in 0..len {
-            let selected = sel == Some(i);
-            let mark = if selected { "> " } else { "  " };
-            let style = if selected {
-                s_sel()
-            } else {
-                Style::default().fg(Color::White)
-            };
-            let label = match app.browse_item_at(i) {
-                Some(BrowseItem::Parent) => "../".to_string(),
-                Some(BrowseItem::Entry(e)) if e.is_dir => format!("{}/", e.name),
-                Some(BrowseItem::Entry(e)) => e.name.clone(),
-                None => continue,
-            };
-            let row_style = if selected {
-                style
-            } else if matches!(app.browse_item_at(i), Some(BrowseItem::Entry(e)) if e.is_dir)
-                || matches!(app.browse_item_at(i), Some(BrowseItem::Parent))
-            {
-                s_hint()
-            } else {
-                style
-            };
-            lines.push(Line::from(Span::styled(
-                format!("{mark}{label}"),
-                row_style,
-            )));
-        }
+        let items: Vec<ListItem> = (0..len)
+            .filter_map(|i| {
+                let (label, is_dir) = match app.browse_item_at(i) {
+                    Some(BrowseItem::Parent) => ("../".to_string(), true),
+                    Some(BrowseItem::Entry(e)) if e.is_dir => (format!("{}/", e.name), true),
+                    Some(BrowseItem::Entry(e)) => (e.name.clone(), false),
+                    None => return None,
+                };
+                // Dirs stay blue so navigation targets stand out from launchables.
+                let style = if is_dir {
+                    s_hint()
+                } else {
+                    s_text()
+                };
+                Some(ListItem::new(Span::styled(label, style)))
+            })
+            .collect();
+        let list = List::new(items)
+            .highlight_style(s_sel())
+            .highlight_symbol("> ");
+        f.render_stateful_widget(list, chunks[1], &mut app.browse_state);
     }
 
-    lines.push(Line::from(""));
     let keys = if app.browse_floor.is_none() {
         "↑↓ · Enter · Esc source · h/~ $HOME"
     } else {
         "↑↓ · Enter · Esc source (stays inside prefix)"
     };
-    lines.push(Line::from(Span::styled(keys, s_hint())));
-
-    let p = Paragraph::new(lines)
-        .block(block_main("Pick exe"))
-        .wrap(Wrap { trim: false });
-    f.render_widget(p, area);
+    // Position indicator when the list can exceed one screenful.
+    let footer = if len > 0 {
+        let sel = app.browse_state.selected().unwrap_or(0) + 1;
+        format!("{keys}  ·  {sel}/{len}")
+    } else {
+        keys.to_string()
+    };
+    f.render_widget(Paragraph::new(Span::styled(footer, s_hint())), chunks[2]);
 }
