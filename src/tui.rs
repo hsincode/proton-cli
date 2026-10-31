@@ -417,6 +417,15 @@ fn app_proton_picker_value(
 }
 
 pub fn run(paths: Paths, config: Config) -> Result<()> {
+    // release は panic = "abort" なので後片付けのコードは走らない。
+    // パニック時も端末を raw mode / 代替スクリーンのまま残さないよう hook で戻す。
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        disable_raw_mode().ok();
+        execute!(stdout(), LeaveAlternateScreen, Show).ok();
+        default_hook(info);
+    }));
+
     enable_raw_mode().map_err(Error::Io)?;
     let mut out = stdout();
     execute!(out, EnterAlternateScreen).map_err(Error::Io)?;

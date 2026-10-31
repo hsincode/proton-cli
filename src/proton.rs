@@ -185,27 +185,19 @@ pub fn resolve_proton_path(
 
 pub fn install_dwproton(paths: &Paths, version: Option<&str>, force: bool) -> Result<PathBuf> {
     paths.ensure_dirs()?;
-    let client = reqwest::blocking::Client::builder()
+    let client: ureq::Agent = ureq::Agent::config_builder()
         .user_agent(concat!("protoncli/", env!("CARGO_PKG_VERSION")))
         .build()
-        .map_err(|e| Error::Download(e.to_string()))?;
+        .into();
 
     let release: Release = if let Some(tag) = version {
         let url = format!("{DWPROTON_API_TAG}/{tag}");
         println!("==> Fetching release {tag}");
-        client
-            .get(&url)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .and_then(|r| r.json())
+        fetch_json(&client, &url)
             .map_err(|e| Error::Download(format!("release metadata: {e}")))?
     } else {
         println!("==> Fetching latest dwproton release");
-        client
-            .get(DWPROTON_API_LATEST)
-            .send()
-            .and_then(|r| r.error_for_status())
-            .and_then(|r| r.json())
+        fetch_json(&client, DWPROTON_API_LATEST)
             .map_err(|e| Error::Download(format!("latest release: {e}")))?
     };
 
@@ -293,18 +285,21 @@ pub fn install_dwproton(paths: &Paths, version: Option<&str>, force: bool) -> Re
     Ok(target)
 }
 
-fn download_file(
-    client: &reqwest::blocking::Client,
+/// GET して JSON を読む。4xx/5xx は ureq が Err にする。
+fn fetch_json<T: serde::de::DeserializeOwned>(
+    client: &ureq::Agent,
     url: &str,
-    dest: &Path,
-) -> Result<()> {
+) -> std::result::Result<T, ureq::Error> {
+    client.get(url).call()?.body_mut().read_json()
+}
+
+fn download_file(client: &ureq::Agent, url: &str, dest: &Path) -> Result<()> {
     let response = client
         .get(url)
-        .send()
-        .and_then(|r| r.error_for_status())
+        .call()
         .map_err(|e| Error::Download(e.to_string()))?;
 
-    let total = response.content_length();
+    let total = response.body().content_length();
     let pb = if let Some(len) = total {
         let pb = ProgressBar::new(len);
         pb.set_style(
@@ -326,7 +321,9 @@ fn download_file(
     };
 
     let mut file = File::create(dest)?;
-    let mut reader = response;
+    // as_reader() はサイズ上限なし（tarball は数百 MB になる）
+    let mut body = response.into_body();
+    let mut reader = body.as_reader();
     let mut buf = [0u8; 64 * 1024];
     loop {
         let n = reader

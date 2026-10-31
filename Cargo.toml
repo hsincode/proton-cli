@@ -28,7 +28,7 @@ directories = "6.0.0"
 hex = "0.4.3"
 indicatif = "0.18.6"
 ratatui = "0.29.0"
-reqwest = { version = "0.13.4", default-features = false, features = ["rustls", "blocking", "json"] }
+ureq = { version = "3.5.0", default-features = false, features = ["rustls", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
 sha2 = "0.11.0"
 tar = "0.4.46"
@@ -39,3 +39,11 @@ xz2 = "0.1.7"
 
 [dev-dependencies]
 tempfile = "3"
+
+[profile.release]
+# 配布バイナリを小さくする（速度は CLI 用途では体感差なし）
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
