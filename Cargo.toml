@@ -1,7 +1,7 @@
 [package]
 # crates.io の package 名（`proton-cli` は 0.0.0 スタブに占有されているため protoncli）
 name = "protoncli"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 rust-version = "1.80"
 description = "CLI launcher for Windows games/apps via umu + Proton (dwproton by default)"
