@@ -6,6 +6,7 @@
   - 名前付きインストール（GE や特定の `dwproton-*`）は global `explicit_path` より優先（タイトルごとにビルドを固定できる）。
 - **バイナリ縮小**: release プロファイルに LTO / strip / `opt-level = "s"` / `panic = "abort"` を設定し、HTTP クライアントを `reqwest`（tokio/hyper）から `ureq` に置き換え。9.6 MB → 2.9 MB。
   - `panic = "abort"` でも TUI がパニック時に端末（raw mode / 代替スクリーン）を元に戻すよう panic hook を追加。
+- **リポジトリを GitHub に移行**: https://github.com/hsincode/proton-cli 。CI / 公開ワークフローを Forgejo Actions から GitHub Actions に移植（リリースは GitHub Release を作成）。
 
 ## 0.1.6
 

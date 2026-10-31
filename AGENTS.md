@@ -5,7 +5,7 @@ Wine / Proton 本体は同梱しない。ユーザー向け説明は [README.md]
 
 | 項目 | 値 |
 |------|-----|
-| リポジトリ | https://codeberg.org/xuanling/proton-cli |
+| リポジトリ | https://github.com/hsincode/proton-cli |
 | crates.io パッケージ名 | `protoncli`（`proton-cli` は占有済み） |
 | バイナリ / コマンド名 | `protoncli` |
 | MSRV | 1.80 |
@@ -31,7 +31,7 @@ cargo build --release --locked
 cargo run --locked --bin protoncli -- <subcommand>
 ```
 
-CI（`.forgejo/workflows/ci.yml`）は `cargo test --locked` と `cargo build --release --locked`。
+CI（`.github/workflows/ci.yml`、GitHub Actions）は `cargo test --locked` と `cargo build --release --locked`。
 
 ## ソース構成（`src/`）
 

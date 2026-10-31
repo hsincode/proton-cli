@@ -75,8 +75,8 @@ crates.io の **パッケージ名もコマンド名も `protoncli`** です（�
 # crates.io
 cargo install protoncli
 
-# Git（Codeberg）
-cargo install --git https://codeberg.org/xuanling/proton-cli.git
+# Git（GitHub）
+cargo install --git https://github.com/hsincode/proton-cli.git
 
 # ソースから
 cargo install --path .
@@ -336,7 +336,7 @@ protoncli launch <id>
 |------|-----|
 | package | **`protoncli`**（`cargo install protoncli`） |
 | バイナリ / コマンド | **`protoncli`** |
-| リポジトリ | https://codeberg.org/xuanling/proton-cli |
+| リポジトリ | https://github.com/hsincode/proton-cli |
 
 ---
 
