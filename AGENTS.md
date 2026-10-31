@@ -45,7 +45,7 @@ CI（`.forgejo/workflows/ci.yml`）は `cargo test --locked` と `cargo build --
 | `launch.rs` | umu-run 優先、なければ Steam 経路。Vulkan ICD sanitize / graphics |
 | `proton.rs` / `steam.rs` | Proton 取得・検出 |
 | `desktop.rs` | `.desktop` ショートカット |
-| `doctor.rs` / `tui.rs` | 診断・ミニマル TUI（Apps → `o` で exe / locale / graphics） |
+| `doctor.rs` / `tui.rs` | 診断・ミニマル TUI（Apps → `o` で exe / proton / locale / graphics） |
 | `error.rs` | エラー型 |
 
 ## 守ること

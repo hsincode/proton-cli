@@ -56,8 +56,8 @@ impl Default for Config {
 
 /// Global launch behaviour (Steam/Lutris-like defaults).
 ///
-/// Per-app overrides live on [`crate::apps::AppEntry`] (`locale`, `graphics`,
-/// `gamescope`, env).
+/// Per-app overrides live on [`crate::apps::AppEntry`] (`proton`, `locale`,
+/// `graphics`, `gamescope`, env).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaunchConfig {

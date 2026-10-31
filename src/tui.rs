@@ -4,7 +4,7 @@
 //! app list / launch, register app, wine prefixes, Proton runtime, launch settings
 //! (locale / graphics / Vulkan sanitize / log level / gamescope), **environment variables**, doctor.
 //! On first run (`config.locale` unset) a locale picker is shown before the home menu.
-//! Per-app locale / graphics / gamescope / **exe** / **env** can be set from the Apps list (`o` or `e`).
+//! Per-app **proton** / locale / graphics / gamescope / **exe** / **env** can be set from the Apps list (`o` or `e`).
 //! Exe change uses a filtered browser (dirs + `.exe` only) over the wineprefix or host FS.
 
 use std::io::{self, stdout};
@@ -46,11 +46,12 @@ const LAUNCH_SET_LEN: usize = 5;
 /// Rows on the per-app settings screen.
 const APP_SET_NAME: usize = 0;
 const APP_SET_EXE: usize = 1;
-const APP_SET_LOCALE: usize = 2;
-const APP_SET_GRAPHICS: usize = 3;
-const APP_SET_GAMESCOPE: usize = 4;
-const APP_SET_ENV: usize = 5;
-const APP_SET_LEN: usize = 6;
+const APP_SET_PROTON: usize = 2;
+const APP_SET_LOCALE: usize = 3;
+const APP_SET_GRAPHICS: usize = 4;
+const APP_SET_GAMESCOPE: usize = 5;
+const APP_SET_ENV: usize = 6;
+const APP_SET_LEN: usize = 7;
 
 /// Rows on the “where to browse for exe” chooser.
 const EXE_MODE_PREFIX: usize = 0;
@@ -181,7 +182,9 @@ enum Screen {
     EnvEdit,
     /// Per-app locale picker (inherit or override).
     AppLocale,
-    /// Per-app launch options: name + exe + locale + graphics + env.
+    /// Per-app Proton picker (inherit or a discovered install).
+    AppProton,
+    /// Per-app launch options: name + exe + proton + locale + graphics + env.
     AppSettings,
     /// Edit display name for the open app.
     AppNameEdit,
@@ -287,6 +290,8 @@ struct App {
     app_graphics_sel: usize,
     /// Per-app gamescope picker index (0 = inherit, 1 = on, 2 = off).
     app_gamescope_sel: usize,
+    /// Per-app Proton picker index (0 = inherit, 1+ = [`Self::proton_installs`]).
+    app_proton_sel: usize,
     /// Selected row on global EnvSettings (index into sorted keys).
     env_sel: usize,
     /// Selected row on AppEnv (0 = mode toggle; 1+ = custom env keys).
@@ -382,6 +387,35 @@ fn app_gamescope_picker_label(i: usize, global: &config::GamescopeConfig) -> Str
     }
 }
 
+/// Rows in the per-app Proton picker: inherit + each discovered install.
+fn app_proton_picker_len(installs: &[proton::ProtonInstall]) -> usize {
+    1 + installs.len()
+}
+
+/// Map `app.proton` to picker index (`0` = inherit global).
+fn app_proton_picker_index(app: Option<&str>, installs: &[proton::ProtonInstall]) -> usize {
+    match app {
+        None => 0,
+        Some(name) => installs
+            .iter()
+            .position(|p| p.name == name)
+            .map(|i| i + 1)
+            .unwrap_or(0),
+    }
+}
+
+/// Map picker index back to `Option` Proton name (`None` = inherit).
+fn app_proton_picker_value(
+    sel: usize,
+    installs: &[proton::ProtonInstall],
+) -> Option<String> {
+    if sel == 0 {
+        None
+    } else {
+        installs.get(sel - 1).map(|p| p.name.clone())
+    }
+}
+
 pub fn run(paths: Paths, config: Config) -> Result<()> {
     enable_raw_mode().map_err(Error::Io)?;
     let mut out = stdout();
@@ -444,6 +478,7 @@ impl App {
             app_set_sel: 0,
             app_graphics_sel: 0,
             app_gamescope_sel: 0,
+            app_proton_sel: 0,
             env_sel: 0,
             app_env_sel: 0,
             app_use_custom_env: false,
@@ -571,6 +606,29 @@ impl App {
         Ok(())
     }
 
+    fn apply_app_proton(&mut self) -> Result<()> {
+        let Some(id) = self.app_settings_id.clone() else {
+            self.status = "no app selected".into();
+            return Ok(());
+        };
+        let value = app_proton_picker_value(self.app_proton_sel, &self.proton_installs);
+        let mut db = AppsDb::load(&self.paths)?;
+        let entry = db
+            .apps
+            .get_mut(&id)
+            .ok_or_else(|| Error::AppNotFound(id.clone()))?;
+        entry.proton = value.clone();
+        db.save(&self.paths)?;
+        self.status = match value {
+            Some(p) => format!("`{id}` proton = {p} (per-app override)"),
+            None => format!(
+                "`{id}` proton = inherit global [{}]",
+                self.config.proton.default
+            ),
+        };
+        Ok(())
+    }
+
     fn apply_app_graphics(&mut self) -> Result<()> {
         let Some(id) = self.app_settings_id.clone() else {
             self.status = "no app selected".into();
@@ -602,9 +660,13 @@ impl App {
         };
         let db = AppsDb::load(&self.paths)?;
         let entry = db.get(&id)?;
+        // Refresh so the Proton picker sees installs added since TUI start.
+        self.proton_installs = proton::list_installs(&self.paths).unwrap_or_default();
         self.app_locale_sel = locale::app_picker_index(entry.locale.as_deref());
         self.app_graphics_sel = app_graphics_picker_index(entry.graphics.as_deref());
         self.app_gamescope_sel = app_gamescope_picker_index(entry.gamescope);
+        self.app_proton_sel =
+            app_proton_picker_index(entry.proton.as_deref(), &self.proton_installs);
         self.app_use_custom_env = entry.use_custom_env;
         self.app_settings_exe = entry.exe.clone();
         self.app_settings_name = entry.name.clone();
@@ -1015,16 +1077,9 @@ impl App {
         self.start_browse_filesystem()
     }
 
-    /// Sync register-form proton cursor to `config.proton.default` when possible.
+    /// Register-form Proton starts at inherit (row 0) so new apps follow global default.
     fn reset_add_proton_sel(&mut self) {
-        let def = self.config.proton.default.as_str();
-        if let Some(i) = self.proton_installs.iter().position(|p| p.name == def) {
-            self.add_proton_sel = i;
-        } else if let Some(i) = self.active_proton_index() {
-            self.add_proton_sel = i;
-        } else {
-            self.add_proton_sel = 0;
-        }
+        self.add_proton_sel = 0;
     }
 
     /// Toggle form text cursor visibility (~2 Hz when the active field accepts typing).
@@ -1323,6 +1378,7 @@ fn drain_pending_events() {
 fn handle_key(app: &mut App, key: KeyEvent) -> Result<()> {
     match app.screen {
         Screen::LocaleSetup | Screen::Locale | Screen::AppLocale => handle_locale_key(app, key)?,
+        Screen::AppProton => handle_app_proton_key(app, key)?,
         Screen::LaunchSettings => handle_launch_settings_key(app, key)?,
         Screen::EnvSettings => handle_env_settings_key(app, key)?,
         Screen::EnvEdit => handle_env_edit_key(app, key)?,
@@ -1882,6 +1938,17 @@ fn handle_app_settings_key(app: &mut App, key: KeyEvent) -> Result<()> {
         KeyCode::Enter | KeyCode::Char(' ') => match app.app_set_sel {
             APP_SET_NAME => app.open_app_name_edit(),
             APP_SET_EXE => app.open_exe_browse_mode(),
+            APP_SET_PROTON => {
+                let id = app.app_settings_id.as_deref().unwrap_or("?");
+                let n = app_proton_picker_len(&app.proton_installs);
+                if n > 0 && app.app_proton_sel >= n {
+                    app.app_proton_sel = 0;
+                }
+                app.status = format!(
+                    "proton for `{id}`  ↑↓/jk/C-n C-p  Enter save  Esc back"
+                );
+                app.screen = Screen::AppProton;
+            }
             APP_SET_LOCALE => {
                 let id = app.app_settings_id.as_deref().unwrap_or("?");
                 app.status = format!("locale for `{id}`  ↑↓/jk/C-n C-p  Enter save  Esc back");
@@ -1900,6 +1967,42 @@ fn handle_app_settings_key(app: &mut App, key: KeyEvent) -> Result<()> {
             APP_SET_ENV => app.open_app_env_settings()?,
             _ => {}
         },
+        _ => {}
+    }
+    Ok(())
+}
+
+fn handle_app_proton_key(app: &mut App, key: KeyEvent) -> Result<()> {
+    let n = app_proton_picker_len(&app.proton_installs).max(1);
+    if is_nav_prev(key, NavMode::List) {
+        cycle_prev(&mut app.app_proton_sel, n);
+        return Ok(());
+    }
+    if is_nav_next(key, NavMode::List) {
+        cycle_next(&mut app.app_proton_sel, n);
+        return Ok(());
+    }
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('q') => {
+            // Reload index from disk so cancel discards an unsaved cursor move.
+            if let Some(id) = app.app_settings_id.as_deref() {
+                if let Ok(db) = AppsDb::load(&app.paths) {
+                    if let Ok(entry) = db.get(id) {
+                        app.app_proton_sel = app_proton_picker_index(
+                            entry.proton.as_deref(),
+                            &app.proton_installs,
+                        );
+                    }
+                }
+            }
+            let id = app.app_settings_id.as_deref().unwrap_or("?");
+            app.status = format!("settings for `{id}`  ↑↓/jk/C-n C-p  Enter edit  Esc back");
+            app.screen = Screen::AppSettings;
+        }
+        KeyCode::Enter | KeyCode::Char(' ') => {
+            app.apply_app_proton()?;
+            app.screen = Screen::AppSettings;
+        }
         _ => {}
     }
     Ok(())
@@ -2219,16 +2322,17 @@ fn handle_add_app_activate(app: &mut App, code: KeyCode) -> Result<()> {
 }
 
 fn cycle_add_proton(app: &mut App, dir: i32) {
-    let n = app.proton_installs.len().max(1);
-    if app.proton_installs.is_empty() {
-        app.add_proton_sel = 0;
-        app.status = "no Proton installs found — run Proton settings [i] install".into();
-        return;
-    }
+    // Row 0 is inherit; remaining rows are discovered installs.
+    let n = app_proton_picker_len(&app.proton_installs).max(1);
     let cur = app.add_proton_sel.min(n - 1) as i32;
     let next = (cur + dir).rem_euclid(n as i32) as usize;
     app.add_proton_sel = next;
-    if let Some(p) = app.proton_installs.get(next) {
+    if next == 0 {
+        app.status = format!(
+            "proton = inherit global [{}]",
+            app.config.proton.default
+        );
+    } else if let Some(p) = app.proton_installs.get(next - 1) {
         app.status = format!("proton = {} [{}]", p.name, p.source);
     }
 }
@@ -2264,11 +2368,8 @@ fn add_resolved_prefix(app: &App) -> std::result::Result<String, String> {
     }
 }
 
-fn add_resolved_proton(app: &App) -> String {
-    app.proton_installs
-        .get(app.add_proton_sel)
-        .map(|p| p.name.clone())
-        .unwrap_or_else(|| app.config.proton.default.clone())
+fn add_resolved_proton(app: &App) -> Option<String> {
+    app_proton_picker_value(app.add_proton_sel, &app.proton_installs)
 }
 
 
@@ -2433,6 +2534,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         Screen::EnvSettings => "Environment",
         Screen::EnvEdit => "Edit env",
         Screen::AppLocale => "Locale (app)",
+        Screen::AppProton => "Proton (app)",
         Screen::AppSettings => "App settings",
         Screen::AppNameEdit => "Edit name",
         Screen::AppEnv => "App env",
@@ -2468,6 +2570,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
         Screen::LocaleSetup | Screen::Locale | Screen::AppLocale => {
             ui_locale_picker(f, app, chunks[1]);
         }
+        Screen::AppProton => ui_app_proton(f, app, chunks[1]),
         Screen::LaunchSettings => ui_launch_settings(f, app, chunks[1]),
         Screen::EnvSettings => ui_env_settings(f, app, chunks[1]),
         Screen::EnvEdit => ui_env_edit(f, app, chunks[1]),
@@ -2524,13 +2627,17 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
                                 Some(g) => format!("gfx={g}"),
                                 None => "gfx=global".into(),
                             };
+                            let prt = match e.proton.as_deref() {
+                                Some(p) => format!("proton={p}"),
+                                None => "proton=global".into(),
+                            };
                             let pfx_mark = if missing {
                                 format!("pfx={}  [NO PREFIX]", e.prefix)
                             } else {
                                 format!("pfx={}", e.prefix)
                             };
                             let text = format!(
-                                "{id}  —  {}  {pfx_mark}  {loc}  {gfx}  {}",
+                                "{id}  —  {}  {pfx_mark}  {prt}  {loc}  {gfx}  {}",
                                 e.name,
                                 e.exe.display()
                             );
@@ -2625,6 +2732,7 @@ fn ui(f: &mut ratatui::Frame, app: &mut App) {
     {
         s_ok()
     } else if app.status.contains("locale =")
+        || app.status.contains("proton =")
         || app.status.contains("graphics =")
         || app.status.contains("sanitize_vulkan =")
         || app.status.contains("log_level =")
@@ -2849,33 +2957,51 @@ fn ui_add_app(f: &mut ratatui::Frame, app: &App, area: Rect) {
     )
     .into());
 
-    if app.proton_installs.is_empty() {
-        let sel = add_resolved_proton(app);
+    let inherit_label = format!(
+        "inherit global [{}]",
+        app.config.proton.default
+    );
+    let n_picker = app_proton_picker_len(&app.proton_installs).max(1);
+    let sel = app.add_proton_sel.min(n_picker - 1);
+
+    if proton_active {
+        // Row 0 = inherit; remaining rows are discovered installs.
+        let inherit_on = sel == 0;
         lines.push(Line::from(Span::styled(
-            format!("    (none discovered) using logical `{sel}` — install via Proton settings"),
-            s_warn(),
+            format!(
+                "{}{}",
+                if inherit_on { "❯ " } else { "  " },
+                inherit_label
+            ),
+            if inherit_on { s_sel() } else { s_hint() },
         )));
-    } else if proton_active {
-        // Full list while focused so ↑↓/jk pick an install.
-        for (i, p) in app.proton_installs.iter().enumerate() {
-            let on = i == app.add_proton_sel.min(app.proton_installs.len() - 1);
-            let mark = if on { "❯ " } else { "  " };
-            let style = if on { s_sel() } else { s_text() };
+        if app.proton_installs.is_empty() {
             lines.push(Line::from(Span::styled(
-                format!("{mark}[{}] {}  {}", p.source, p.name, p.path.display()),
-                style,
+                "    (none discovered — inherit until Proton settings [i] install)",
+                s_warn(),
             )));
+        } else {
+            for (i, p) in app.proton_installs.iter().enumerate() {
+                let on = sel == i + 1;
+                let mark = if on { "❯ " } else { "  " };
+                let style = if on { s_sel() } else { s_text() };
+                lines.push(Line::from(Span::styled(
+                    format!("{mark}[{}] {}  {}", p.source, p.name, p.path.display()),
+                    style,
+                )));
+            }
         }
         lines.push(Line::from(Span::styled(
             "    ↑↓/jk/←→ cycle · Space next · Enter save form",
             s_hint(),
         )));
     } else {
-        // Collapsed summary of the current choice.
-        let p = app.proton_installs.get(app.add_proton_sel);
-        let text = match p {
-            Some(p) => format!("    [{}] {}", p.source, p.name),
-            None => format!("    {}", add_resolved_proton(app)),
+        let text = if sel == 0 {
+            format!("    {inherit_label}")
+        } else if let Some(p) = app.proton_installs.get(sel - 1) {
+            format!("    [{}] {}", p.source, p.name)
+        } else {
+            format!("    {inherit_label}")
         };
         lines.push(Line::from(Span::styled(text, s_text())));
     }
@@ -2886,7 +3012,7 @@ fn ui_add_app(f: &mut ratatui::Frame, app: &App, area: Rect) {
         s_dim(),
     )));
     lines.push(Line::from(Span::styled(
-        "Name empty → exe stem. Locale / graphics / env inherit global after register.",
+        "Name empty → exe stem. Proton / locale / graphics / env inherit global unless overridden.",
         s_dim(),
     )));
     lines.push(Line::from(Span::styled(
@@ -3456,6 +3582,67 @@ fn ui_app_env(f: &mut ratatui::Frame, app: &App, area: Rect) {
     f.render_widget(p, area);
 }
 
+fn ui_app_proton(f: &mut ratatui::Frame, app: &App, area: Rect) {
+    let id = app.app_settings_id.as_deref().unwrap_or("?");
+    let n = app_proton_picker_len(&app.proton_installs).max(1);
+    let sel = app.app_proton_sel.min(n - 1);
+
+    let mut lines: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("Per-app Proton for ", s_dim()),
+            Span::styled(id.to_string(), s_accent()),
+        ]),
+        Line::from(Span::styled(
+            "Overrides global only for this app. First option inherits config.proton.default.",
+            s_dim(),
+        )),
+        Line::from(""),
+    ];
+
+    let inherit_on = sel == 0;
+    lines.push(Line::from(Span::styled(
+        format!(
+            "{}Use global default  [{}]",
+            if inherit_on { "> " } else { "  " },
+            app.config.proton.default
+        ),
+        if inherit_on { s_sel() } else { s_hint() },
+    )));
+
+    if app.proton_installs.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "  (none discovered — install via Proton settings [i])",
+            s_warn(),
+        )));
+    } else {
+        for (i, inst) in app.proton_installs.iter().enumerate() {
+            let on = sel == i + 1;
+            let mark = if on { "> " } else { "  " };
+            let style = if on { s_sel() } else { s_text() };
+            lines.push(Line::from(Span::styled(
+                format!(
+                    "{mark}[{src}] {name}  {path}",
+                    src = inst.source,
+                    name = inst.name,
+                    path = inst.path.display()
+                ),
+                style,
+            )));
+        }
+    }
+
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "↑↓/jk/C-n C-p select · Enter save · Esc cancel",
+        s_hint(),
+    )));
+
+    let p = Paragraph::new(lines)
+        .block(block_main("App Proton  [Enter]  [Esc]"))
+        .wrap(Wrap { trim: false });
+    f.render_widget(p, area);
+}
+
 fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
     let id = app.app_settings_id.as_deref().unwrap_or("?");
     let name_disp = if app.app_settings_name.is_empty() {
@@ -3467,6 +3654,11 @@ fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         "(not set)".to_string()
     } else {
         app.app_settings_exe.display().to_string()
+    };
+    let proton_disp = match app_proton_picker_value(app.app_proton_sel, &app.proton_installs)
+    {
+        None => format!("inherit global [{}]", app.config.proton.default),
+        Some(p) => p,
     };
     let loc = match locale::app_picker_value(app.app_locale_sel) {
         None => format!(
@@ -3500,9 +3692,10 @@ fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
         "default (global [launch.env] only)".into()
     };
 
-    let rows: [(&str, String); 6] = [
+    let rows: [(&str, String); 7] = [
         ("Name", name_disp),
         ("Exe", exe_disp),
+        ("Proton", proton_disp),
         ("Locale", loc),
         ("Graphics", gfx),
         ("Gamescope", gs),
@@ -3540,7 +3733,7 @@ fn ui_app_settings(f: &mut ratatui::Frame, app: &App, area: Rect) {
     }
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Nav: ↑↓/jk/C-n C-p · Name · Exe · Locale · Graphics · Gamescope · Env",
+        "Nav: ↑↓/jk/C-n C-p · Name · Exe · Proton · Locale · Graphics · Gamescope · Env",
         s_hint(),
     )));
     lines.push(Line::from(Span::styled("Esc back to Apps", s_hint())));

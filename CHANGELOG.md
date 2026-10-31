@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **アプリ個別 Proton**: `apps.toml` の `proton`（未設定は global `config.proton.default` を継承）。TUI Apps → **o** → Proton、`add --proton NAME`、Register フォームの inherit 行。
+  - 名前付きインストール（GE や特定の `dwproton-*`）は global `explicit_path` より優先（タイトルごとにビルドを固定できる）。
+
 ## 0.1.6
 
 - TUI **ライトテーマ向け可読性**: 本文を `Color::White` 固定から端末デフォルト前景色へ。警告/アクセントは Bold、入力フォーカス値は黄 on 暗灰でコントラスト確保。

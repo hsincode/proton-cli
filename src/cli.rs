@@ -45,9 +45,9 @@ pub enum Commands {
         /// Default: config.default_prefix (usually `default`).
         #[arg(long)]
         prefix: Option<String>,
-        /// Proton logical name or path (default: dwproton)
-        #[arg(long, default_value = "dwproton")]
-        proton: String,
+        /// Proton logical name, directory name, or path. Omit to inherit global default.
+        #[arg(long)]
+        proton: Option<String>,
         /// umu GAMEID for protonfixes
         #[arg(long)]
         game_id: Option<String>,
@@ -93,9 +93,9 @@ pub enum Commands {
         /// Wineprefix id or absolute path (default: config.default_prefix)
         #[arg(long)]
         prefix: Option<String>,
-        /// Proton logical name or path
-        #[arg(long, default_value = "dwproton")]
-        proton: String,
+        /// Proton logical name or path (default: config.proton.default)
+        #[arg(long)]
+        proton: Option<String>,
         /// umu GAMEID
         #[arg(long, default_value = "umu-default")]
         game_id: String,

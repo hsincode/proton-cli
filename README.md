@@ -111,8 +111,8 @@ protoncli add --exe /path/to/Game.exe
 # または明示名
 protoncli add --name "My Game" --exe /path/to/Game.exe
 
-# 専用 prefix を指定する場合
-protoncli add --name "Other" --exe /path/to/Other.exe --prefix other-game
+# 専用 prefix / Proton を指定する場合（省略時は global を継承）
+protoncli add --name "Other" --exe /path/to/Other.exe --prefix other-game --proton GE-Proton9-16
 
 # 5. 起動
 protoncli launch my-game
@@ -184,8 +184,8 @@ protoncli tui
 | 画面 | 内容 |
 |------|------|
 | **Locale**（初回） | 起動ロケール選択（日本語 / English）。`config.locale` 未設定時に必ず表示 |
-| Apps | 一覧・起動・削除（prefix は保持）。**`o`** でアプリ個別 **exe** / locale / graphics。**prefix ディレクトリが無い行は赤 + `[NO PREFIX]`** |
-| Register app | **Name/Id** 文字入力（点滅カーソル）· **Exe** 内蔵ピッカー（dirs+.exe）· **Prefix** default/auto/custom（Enter 切替）· **Proton** 検出一覧から選択 |
+| Apps | 一覧・起動・削除（prefix は保持）。**`o`** でアプリ個別 **exe** / **proton** / locale / graphics。**prefix ディレクトリが無い行は赤 + `[NO PREFIX]`** |
+| Register app | **Name/Id** 文字入力（点滅カーソル）· **Exe** 内蔵ピッカー（dirs+.exe）· **Prefix** default/auto/custom（Enter 切替）· **Proton** inherit または検出一覧 |
 | Wine prefixes | 一覧・`pfx-N` 作成・**`d` 削除**（`default` 不可・参照中は拒否）・設定の default 変更 |
 | Proton settings | dwproton インストール、prefer managed / steam |
 | Launch settings | グローバル **locale** / **graphics** (dxvk\|wined3d) / **sanitize_vulkan** / **log_level** / **gamescope** |
@@ -291,7 +291,9 @@ categories = ["Game"]
   - CLI: `launch <id> --gamescope` / `--no-gamescope`、`run … --gamescope`
   - アプリ個別: `apps.toml` の `gamescope = true|false`、または TUI Apps → **o** → Gamescope、`add --gamescope`
 - `[launch.env]` … 全起動に付与する環境変数。未記載時は `DXVK_HUD=0` / `STEAMOS=1` / `UMU_USE_STEAM=1`。TUI Home → **Environment variables** で編集・ビルトインへリセット可
-- アプリ個別: `apps.toml` の `locale` / `graphics` / `gamescope` / `use_custom_env` + `env`、TUI の Apps → **`o` または `e`**、または `add --locale ja --graphics dxvk` / `run --locale en --graphics wined3d`
+- アプリ個別: `apps.toml` の `proton` / `locale` / `graphics` / `gamescope` / `use_custom_env` + `env`、TUI の Apps → **`o` または `e`**、または `add --proton GE-Proton9-16 --locale ja --graphics dxvk` / `run --proton dwproton --locale en --graphics wined3d`
+  - **proton 未設定** … グローバル `config.proton.default` を継承
+  - **proton = "…"** … そのインストール名（または絶対パス）をこのアプリだけに固定
   - **env モード default**（既定）… グローバル `[launch.env]` のみ
   - **env モード custom** … グローバル既定の**上に**アプリ `env` を追加（同じキーは上書き）
 - 優先順位（env キーごと）: **アプリ custom env > グローバル `[launch.env]` > アプリ locale/graphics 由来 > （それ以外）**

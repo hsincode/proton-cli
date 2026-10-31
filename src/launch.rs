@@ -125,7 +125,11 @@ pub struct LaunchSpec {
 impl LaunchSpec {
     pub fn from_app(paths: &Paths, config: &Config, entry: &AppEntry) -> Result<Self> {
         let prefix = paths.prefix_path(&entry.prefix);
-        let proton_path = proton::resolve_proton_path(paths, &config.proton, &entry.proton)?;
+        let requested = proton::effective_requested(
+            entry.proton.as_deref(),
+            &config.proton.default,
+        );
+        let proton_path = proton::resolve_proton_path(paths, &config.proton, requested)?;
         let graphics = effective_graphics(entry.graphics.as_deref(), &config.launch.graphics);
         let log_level = config::normalize_log_level(&config.launch.log_level);
         Ok(Self {
@@ -330,7 +334,7 @@ mod tests {
             args: vec![],
             cwd: None,
             prefix: "default".into(),
-            proton: "dwproton".into(),
+            proton: None,
             game_id: "umu-default".into(),
             store: "none".into(),
             locale: None,

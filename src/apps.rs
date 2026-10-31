@@ -26,8 +26,10 @@ pub struct AppEntry {
     pub cwd: Option<PathBuf>,
     /// Prefix id relative to prefixes_dir, or absolute path.
     pub prefix: String,
-    #[serde(default = "default_proton")]
-    pub proton: String,
+    /// Per-app Proton (directory name, logical `dwproton`, or absolute path).
+    /// `None` = inherit global `config.proton.default`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proton: Option<String>,
     #[serde(default = "default_game_id")]
     pub game_id: String,
     #[serde(default = "default_store")]
@@ -57,10 +59,6 @@ pub struct AppEntry {
     #[serde(default = "default_true")]
     pub desktop: bool,
     pub created_at: DateTime<Utc>,
-}
-
-fn default_proton() -> String {
-    "dwproton".to_string()
 }
 
 fn default_game_id() -> String {
@@ -189,7 +187,7 @@ pub fn new_entry(
     args: Vec<String>,
     cwd: Option<PathBuf>,
     prefix: String,
-    proton: String,
+    proton: Option<String>,
     game_id: Option<String>,
     store: Option<String>,
     desktop: bool,
@@ -257,7 +255,7 @@ mod tests {
             vec!["-w".into()],
             None,
             "test".into(),
-            "dwproton".into(),
+            None,
             None,
             None,
             true,
@@ -269,6 +267,48 @@ mod tests {
         let loaded = AppsDb::load(&paths).unwrap();
         assert_eq!(loaded.apps["test"].name, "Test");
         assert_eq!(loaded.apps["test"].args, vec!["-w"]);
+        // Omit proton at insert → inherit global (not serialized).
+        assert_eq!(loaded.apps["test"].proton, None);
+    }
+
+    #[test]
+    fn proton_override_roundtrip_and_legacy_dwproton() {
+        let dir = tempdir().unwrap();
+        let paths = test_paths(&dir.path().join(".protoncli"));
+        paths.ensure_dirs().unwrap();
+
+        // Explicit per-app pin survives save/load.
+        let exe = dir.path().join("game.exe");
+        fs::write(&exe, b"MZ").unwrap();
+        let mut db = AppsDb::default();
+        let mut entry = sample_entry("Pinned", "p", exe);
+        entry.proton = Some("GE-Proton9-16".into());
+        db.insert("pinned".into(), entry).unwrap();
+        db.save(&paths).unwrap();
+        let loaded = AppsDb::load(&paths).unwrap();
+        assert_eq!(
+            loaded.apps["pinned"].proton.as_deref(),
+            Some("GE-Proton9-16")
+        );
+
+        // Pre-Option apps.toml with proton = "dwproton" still loads as Some.
+        fs::write(
+            &paths.apps_file,
+            r#"
+[apps.legacy]
+name = "Legacy"
+exe = "/tmp/g.exe"
+prefix = "default"
+proton = "dwproton"
+game_id = "umu-default"
+store = "none"
+desktop = false
+created_at = "2024-01-01T00:00:00Z"
+"#,
+        )
+        .unwrap();
+        let legacy = AppsDb::load(&paths).unwrap();
+        assert_eq!(legacy.apps["legacy"].proton.as_deref(), Some("dwproton"));
     }
 
     fn test_paths(root: &std::path::Path) -> Paths {
@@ -293,7 +333,7 @@ mod tests {
             vec![],
             None,
             prefix.into(),
-            "dwproton".into(),
+            None,
             None,
             None,
             false,

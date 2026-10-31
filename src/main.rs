@@ -140,6 +140,9 @@ fn try_main() -> Result<ExitCode, Error> {
                     if gs { "on" } else { "off" }
                 );
             }
+            if let Some(p) = &entry.proton {
+                println!("  proton  : {p} (per-app)");
+            }
             Ok(ExitCode::SUCCESS)
         }
 
@@ -187,7 +190,11 @@ fn try_main() -> Result<ExitCode, Error> {
             }
             let prefix_id = prefix.unwrap_or_else(|| config.default_prefix.clone());
             let prefix_path = paths.prefix_path(&prefix_id);
-            let proton_path = proton::resolve_proton_path(&paths, &config.proton, &proton)?;
+            let requested = proton::effective_requested(
+                proton.as_deref(),
+                &config.proton.default,
+            );
+            let proton_path = proton::resolve_proton_path(&paths, &config.proton, requested)?;
             let exe = if exe.is_absolute() {
                 exe
             } else {
@@ -468,9 +475,20 @@ fn try_main() -> Result<ExitCode, Error> {
                     config.launch.gamescope.status_label()
                 ),
             }
-            match proton::resolve_proton_path(&paths, &config.proton, &entry.proton) {
-                Ok(p) => println!("proton  : {}", p.display()),
-                Err(_) => println!("proton  : (unresolved: {})", entry.proton),
+            match entry.proton.as_deref() {
+                Some(p) => println!("proton  : {p} (per-app)"),
+                None => println!(
+                    "proton  : (inherit global `{}`)",
+                    config.proton.default
+                ),
+            }
+            let requested = proton::effective_requested(
+                entry.proton.as_deref(),
+                &config.proton.default,
+            );
+            match proton::resolve_proton_path(&paths, &config.proton, requested) {
+                Ok(p) => println!("PROTONPATH: {}", p.display()),
+                Err(_) => println!("PROTONPATH: (unresolved: {requested})"),
             }
             Ok(ExitCode::SUCCESS)
         }

@@ -97,20 +97,39 @@ fn steam_compat_dirs() -> Vec<PathBuf> {
     ]
 }
 
+/// Proton name/path used for a launch: per-app override, else global default.
+///
+/// Empty app values are treated as inherit so legacy `proton = ""` does not
+/// pin a missing install.
+pub fn effective_requested<'a>(app: Option<&'a str>, global: &'a str) -> &'a str {
+    match app {
+        Some(s) if !s.is_empty() => s,
+        _ => global,
+    }
+}
+
 /// Resolve PROTONPATH for a logical name or absolute path.
+///
+/// `cfg.explicit_path` is a global hammer and only applies when resolving the
+/// logical default (`""` / `"dwproton"`). A per-app named Proton (GE, a
+/// specific `dwproton-*` dir, an absolute path) must win so titles can pin
+/// different builds.
 pub fn resolve_proton_path(
     paths: &Paths,
     cfg: &ProtonConfig,
     requested: &str,
 ) -> Result<PathBuf> {
-    if let Some(explicit) = &cfg.explicit_path {
-        if is_valid_proton_dir(explicit) {
-            return Ok(explicit.clone());
+    let inherit_or_logical = requested.is_empty() || requested == "dwproton";
+    if inherit_or_logical {
+        if let Some(explicit) = &cfg.explicit_path {
+            if is_valid_proton_dir(explicit) {
+                return Ok(explicit.clone());
+            }
+            return Err(Error::InvalidProtonPath(explicit.clone()));
         }
-        return Err(Error::InvalidProtonPath(explicit.clone()));
     }
 
-    let req = if requested == "dwproton" || requested.is_empty() {
+    let req = if inherit_or_logical {
         cfg.default.as_str()
     } else {
         requested
@@ -403,4 +422,68 @@ fn copy_dir_all(src: &Path, dst: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Paths;
+    use tempfile::tempdir;
+
+    fn test_paths(root: &Path) -> Paths {
+        Paths {
+            root: root.to_path_buf(),
+            config_dir: root.to_path_buf(),
+            data_dir: root.to_path_buf(),
+            config_file: root.join("config.toml"),
+            apps_file: root.join("apps.toml"),
+            prefixes_dir: root.join("prefixes"),
+            default_prefix: root.join("default"),
+            runtimes_dir: root.join("runtimes"),
+            icons_dir: root.join("icons"),
+            applications_dir: root.join("applications"),
+        }
+    }
+
+    fn fake_proton(dir: &Path, name: &str) -> PathBuf {
+        let p = dir.join(name);
+        fs::create_dir_all(&p).unwrap();
+        fs::write(p.join("proton"), b"#!/bin/sh\n").unwrap();
+        p
+    }
+
+    #[test]
+    fn effective_requested_inherits_empty() {
+        assert_eq!(effective_requested(None, "dwproton"), "dwproton");
+        assert_eq!(effective_requested(Some(""), "dwproton"), "dwproton");
+        assert_eq!(
+            effective_requested(Some("GE-Proton9-16"), "dwproton"),
+            "GE-Proton9-16"
+        );
+    }
+
+    #[test]
+    fn resolve_named_proton_ignores_explicit_path() {
+        let dir = tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        paths.ensure_dirs().unwrap();
+        let pinned = fake_proton(&paths.runtimes_dir, "test-proton-ge");
+        let hammer = fake_proton(&paths.runtimes_dir, "test-proton-hammer");
+
+        let cfg = ProtonConfig {
+            default: "dwproton".into(),
+            prefer: "managed".into(),
+            explicit_path: Some(hammer.clone()),
+        };
+
+        // Logical / inherit still uses the global hammer.
+        let inherited = resolve_proton_path(&paths, &cfg, "").unwrap();
+        assert_eq!(inherited, hammer);
+        let logical = resolve_proton_path(&paths, &cfg, "dwproton").unwrap();
+        assert_eq!(logical, hammer);
+
+        // Per-app named install must not be redirected by explicit_path.
+        let named = resolve_proton_path(&paths, &cfg, "test-proton-ge").unwrap();
+        assert_eq!(named, pinned);
+    }
 }

@@ -100,7 +100,7 @@ mod tests {
             args: vec![],
             cwd: None,
             prefix: "cool-game".into(),
-            proton: "dwproton".into(),
+            proton: None,
             game_id: "umu-default".into(),
             store: "none".into(),
             locale: None,
