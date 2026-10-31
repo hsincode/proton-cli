@@ -45,7 +45,8 @@ CI（`.github/workflows/ci.yml`、GitHub Actions）は `cargo test --locked` と
 | `launch.rs` | umu-run 優先、なければ Steam 経路。Vulkan ICD sanitize / graphics |
 | `proton.rs` / `steam.rs` | Proton 取得・検出 |
 | `desktop.rs` | `.desktop` ショートカット |
-| `doctor.rs` / `tui.rs` | 診断・ミニマル TUI（Apps → `o` で exe / proton / locale / graphics） |
+| `doctor.rs` | 診断（CLI `doctor`、TUI Doctor タブの元データ） |
+| `tui/` | TUI。`app`（状態）· `actions`（保存→再読込）· `keys` · `view` / `view_overlay`（描画）· `overlay`（ピッカー・フォーム・ブラウザ・パレット）· `checks` · `text` · `theme` |
 | `error.rs` | エラー型 |
 
 ## 守ること

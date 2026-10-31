@@ -81,49 +81,6 @@ pub fn effective_id<'a>(app_locale: Option<&'a str>, global: Option<&'a str>) ->
     app_locale.or(global)
 }
 
-// --- Per-app picker (inherit + selectable) ---------------------------------
-
-/// Number of rows in the per-app locale picker: inherit + each selectable locale.
-pub fn app_picker_len() -> usize {
-    1 + selectable().len()
-}
-
-/// Map `app.locale` to a per-app picker index (`0` = inherit global).
-pub fn app_picker_index(app_locale: Option<&str>) -> usize {
-    match app_locale {
-        None => 0,
-        Some(id) => selectable()
-            .iter()
-            .position(|l| l.id == id)
-            .map(|i| i + 1)
-            .unwrap_or(0),
-    }
-}
-
-/// Map a per-app picker index back to `Option` locale id (`None` = inherit).
-pub fn app_picker_value(sel: usize) -> Option<&'static str> {
-    if sel == 0 {
-        None
-    } else {
-        selectable().get(sel - 1).map(|l| l.id)
-    }
-}
-
-/// Label for per-app picker row `i` (0 = inherit).
-pub fn app_picker_label(i: usize, global: Option<&str>) -> String {
-    if i == 0 {
-        let g = global
-            .and_then(find)
-            .map(|l| format!("{} ({})", l.id, l.posix))
-            .unwrap_or_else(|| "not set".into());
-        format!("Use global default  [{g}]")
-    } else if let Some(loc) = selectable().get(i - 1) {
-        format!("{}  —  id={}  posix={}", loc.label, loc.id, loc.posix)
-    } else {
-        "(invalid)".into()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -171,12 +128,4 @@ mod tests {
         assert_eq!(effective_id(None, None), None);
     }
 
-    #[test]
-    fn app_picker_roundtrip() {
-        assert_eq!(app_picker_index(None), 0);
-        assert_eq!(app_picker_value(0), None);
-        let ja_idx = app_picker_index(Some("ja"));
-        assert_eq!(app_picker_value(ja_idx), Some("ja"));
-        assert_eq!(app_picker_len(), 1 + selectable().len());
-    }
 }

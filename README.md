@@ -1,6 +1,6 @@
 # proton-cli
 
-Linux 上で Windows のゲーム・アプリを起動するための **CLI + ミニマル TUI** です。  
+Linux 上で Windows のゲーム・アプリを起動するための **CLI + TUI** です。  
 実行エンジンは **[umu-launcher](https://github.com/Open-Wine-Components/umu-launcher)** と **Proton** で、既定の Proton ビルドは **[dwproton](https://dawn.wine/dawn-winery/dwproton)**（Dawn Winery）です。
 
 本ツールは **薄いオーケストレータ** です。Wine / Proton 本体は同梱しません。アプリ登録・wineprefix 管理・Proton 取得・アプリメニュー用ショートカット作成を行い、起動は `umu-run` に任せます（現行の Lutris / Heroic が Proton を使うやり方と同系統）。
@@ -179,31 +179,39 @@ protoncli
 protoncli tui
 ```
 
-ゲーム前に触りそうな項目だけのミニマル UI です。
+起動直後は **Library**（アプリ一覧）です。左で選んで **Enter** で起動、右には選択中アプリで実際に使われる設定と、その由来（`global` / `override`）が出ます。
 
-| 画面 | 内容 |
+| タブ | 内容 |
 |------|------|
-| **Locale**（初回） | 起動ロケール選択（日本語 / English）。`config.locale` 未設定時に必ず表示 |
-| Apps | 一覧・起動・削除（prefix は保持）。**`o`** でアプリ個別 **exe** / **proton** / locale / graphics。**prefix ディレクトリが無い行は赤 + `[NO PREFIX]`** |
-| Register app | **Name/Id** 文字入力（点滅カーソル）· **Exe** 内蔵ピッカー（dirs+.exe）· **Prefix** default/auto/custom（Enter 切替）· **Proton** inherit または検出一覧 |
-| Wine prefixes | 一覧・`pfx-N` 作成・**`d` 削除**（`default` 不可・参照中は拒否）・設定の default 変更 |
-| Proton settings | dwproton インストール、prefer managed / steam |
-| Launch settings | グローバル **locale** / **graphics** (dxvk\|wined3d) / **sanitize_vulkan** / **log_level** / **gamescope** |
-| Doctor | umu・PROTONPATH・パス確認 |
+| **1 Library** | アプリ一覧と詳細。`Enter` 起動 · `e` 詳細を編集 · `a` 追加 · `d` 削除（確認あり、prefix は保持）· `/` 絞り込み。exe / Proton が見つからない・prefix が無いアプリは一覧に表示 |
+| **2 Proton** | 既定 Proton と検出済み一覧（★ = 既定、使っているアプリ数）。`Enter` 既定に設定 · `i` dwproton をインストール/更新（TUI 内に進捗表示）· `a` 最新 dwproton を既定に · `p` prefer managed / steam |
+| **3 Prefixes** | wineprefix 一覧と使用アプリ。`n` 作成 · `d` 削除（`default` と使用中は不可、確認あり）· `s` 新規アプリの既定にする |
+| **4 Settings** | グローバル **locale** / **graphics** / **Vulkan ICD sanitize** / **log level** / **gamescope**（`←→` で変更）と `[launch.env]`（`a` 追加 · `Enter` 編集 · `d` 削除 · `R` ビルトインに戻す） |
+| **5 Doctor** | 起動バックエンド・umu・Steam・既定 Proton・各アプリの問題をまとめて表示。件数は上部バーにも出る |
 
-各画面のタイトル／status にキー操作のヒントがあります（`↑↓` `Enter` `Esc` など）。
+共通キー: `1`–`5` / `Tab` タブ切替 · `:` コマンドパレット（アプリ名で起動、全操作を検索）· `?` キー一覧 · `q` 終了。一覧は `↑↓` / `j k` / `Ctrl+n p`。初回（`config.locale` 未設定）は起動ロケールの選択から始まります。
+
+### アプリ個別の設定（Library → `e`）
+
+| 行 | 操作 |
+|----|------|
+| Name | `Enter` で名前を変更（id は固定） |
+| Exe | `Enter` → 探索元（wineprefix / ファイルシステム）→ ブラウザで `.exe` を選ぶ |
+| Proton / Locale / Graphics / Gamescope | `←→` でその場で切替、`Enter` で一覧から選択。先頭の「Use global default」は global を継承 |
+| Env | `Enter` で個別の環境変数（default = global のみ / custom = global + 個別） |
+
+変更は即保存されます。名前と exe を変えると `.desktop` も作り直します。
 
 ### 登録後の exe 変更（TUI）
 
 インストーラを `run` して prefix に入れたあと、本編バイナリへ差し替える流れです。
 
-1. **Apps** → 対象を選んで **`o`**（App settings）
-2. **Exe** を選んで Enter
-3. 探索元を選ぶ  
+1. **Library** で対象を選び **`e`** → **Exe** で Enter
+2. 探索元を選ぶ  
    - **Wineprefix** … そのアプリの bottle 内だけ（`drive_c` から開始、外へは出ない）  
-   - **Filesystem** … ホスト上の任意パス（現在の exe の親、または `$HOME` から。`h` / `~` でホームへ）
-4. 一覧は **ディレクトリと `.exe` だけ**（他のファイルは非表示）
-5. ディレクトリは Enter で入る / `.exe` は Enter で確定（`cwd` も exe の親に更新、`.desktop` も再生成）
+   - **Filesystem** … ホスト上の任意パス（現在の exe の親から。`~` でホームへ）
+3. 一覧は **ディレクトリと `.exe` だけ**。`Enter` / `→` で開く・確定、`←` / `Backspace` で親へ
+4. `.exe` を確定すると `cwd` も exe の親に更新し、`.desktop` も再生成
 
 CLI から本編を最初から登録するなら、従来どおり `add --exe /path/to/Game.exe --prefix <id>` でも可。
 
@@ -279,7 +287,7 @@ categories = ["Game"]
 - `locale` … グローバル起動ロケール（`ja` / `en`）。アプリに `locale` が無ければこれを使う
 - `[launch].sanitize_vulkan` … ホストの `VK_ICD_FILENAMES` / `VK_DRIVER_FILES` を起動時に外す（Steam/Lutris 相当。x86_64 ICD だけ指定されていると 32bit が落ちる）
 - `[launch].graphics` … グローバル D3D バックエンド（`dxvk` / `wined3d`）
-- `[launch].log_level` … 起動時の端末ログ（`quiet` / `normal` / `verbose`）。TUI の Launch settings、または `run --log-level quiet`
+- `[launch].log_level` … 起動時の端末ログ（`quiet` / `normal` / `verbose`）。TUI の Settings タブ、または `run --log-level quiet`
   - **quiet** … 子プロセス（umu/Proton/Wine）の stdout/stderr を捨て、protoncli のバナーも出さない
   - **normal** … 従来どおり子の出力を端末に出す（既定）
   - **verbose** … normal に加え protoncli 側の起動診断を追加
@@ -289,9 +297,9 @@ categories = ["Game"]
   - `force_windows_fullscreen` … ネスト内の排他 FS を埋める（既定 `true`）
   - `width` / `height` / `nested_width` / `nested_height` / `extra_args` / `command` … 任意
   - CLI: `launch <id> --gamescope` / `--no-gamescope`、`run … --gamescope`
-  - アプリ個別: `apps.toml` の `gamescope = true|false`、または TUI Apps → **o** → Gamescope、`add --gamescope`
-- `[launch.env]` … 全起動に付与する環境変数。未記載時は `DXVK_HUD=0` / `STEAMOS=1` / `UMU_USE_STEAM=1`。TUI Home → **Environment variables** で編集・ビルトインへリセット可
-- アプリ個別: `apps.toml` の `proton` / `locale` / `graphics` / `gamescope` / `use_custom_env` + `env`、TUI の Apps → **`o` または `e`**、または `add --proton GE-Proton9-16 --locale ja --graphics dxvk` / `run --proton dwproton --locale en --graphics wined3d`
+  - アプリ個別: `apps.toml` の `gamescope = true|false`、または TUI Library → **e** → Gamescope、`add --gamescope`
+- `[launch.env]` … 全起動に付与する環境変数。未記載時は `DXVK_HUD=0` / `STEAMOS=1` / `UMU_USE_STEAM=1`。TUI の Settings タブで編集・ビルトインへリセット可
+- アプリ個別: `apps.toml` の `proton` / `locale` / `graphics` / `gamescope` / `use_custom_env` + `env`、TUI の Library → **`e`**、または `add --proton GE-Proton9-16 --locale ja --graphics dxvk` / `run --proton dwproton --locale en --graphics wined3d`
   - **proton 未設定** … グローバル `config.proton.default` を継承
   - **proton = "…"** … そのインストール名（または絶対パス）をこのアプリだけに固定
   - **env モード default**（既定）… グローバル `[launch.env]` のみ

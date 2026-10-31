@@ -245,15 +245,6 @@ pub fn normalize_log_level(id: &str) -> &'static str {
     }
 }
 
-/// Cycle quiet → normal → verbose → quiet (TUI Enter on the log-level row).
-pub fn next_log_level(id: &str) -> &'static str {
-    match normalize_log_level(id) {
-        "quiet" => "normal",
-        "normal" => "verbose",
-        _ => "quiet",
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProtonConfig {
@@ -475,9 +466,6 @@ log_level = "normal"
         assert_eq!(normalize_log_level("quiet"), "quiet");
         assert_eq!(normalize_log_level("VERBOSE"), "normal"); // case-sensitive; unknown → normal
         assert_eq!(normalize_log_level("nope"), "normal");
-        assert_eq!(next_log_level("quiet"), "normal");
-        assert_eq!(next_log_level("normal"), "verbose");
-        assert_eq!(next_log_level("verbose"), "quiet");
     }
 
     #[test]

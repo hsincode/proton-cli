@@ -247,7 +247,7 @@ fn try_main() -> Result<ExitCode, Error> {
                 );
                 for (id, e) in &db.apps {
                     let loc = e.locale.as_deref().unwrap_or("-");
-                    // Flag dangling bottles so CLI list matches TUI red rows.
+                    // Flag dangling bottles, like the TUI's "no prefix" marker.
                     let pfx = if paths.prefix_path(&e.prefix).is_dir() {
                         e.prefix.clone()
                     } else {

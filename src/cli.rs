@@ -10,13 +10,13 @@ use clap::{Parser, Subcommand};
     version,
     about = "Run Windows games/apps via umu + Proton (dwproton by default)",
     long_about = "Thin CLI orchestrator around umu-run and Proton.\n\
-                  Run with no subcommand for a minimal setup TUI.\n\
+                  Run with no subcommand for the interactive TUI.\n\
                   Does not bundle Proton; install a runtime with `protoncli proton install`.\n\
                   Requires umu-launcher on PATH for Steam-equivalent launches.\n\
                   Wine prefixes live under ~/.protoncli (default: ~/.protoncli/default)."
 )]
 pub struct Cli {
-    /// Subcommand. When omitted, launches the setup TUI.
+    /// Subcommand. When omitted, launches the TUI.
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -162,7 +162,7 @@ pub enum Commands {
         id: String,
     },
 
-    /// Open the setup TUI (same as running with no args)
+    /// Open the TUI (same as running with no args)
     Tui,
 }
 

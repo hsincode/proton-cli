@@ -2,7 +2,16 @@
 
 ## Unreleased
 
-- **アプリ個別 Proton**: `apps.toml` の `proton`（未設定は global `config.proton.default` を継承）。TUI Apps → **o** → Proton、`add --proton NAME`、Register フォームの inherit 行。
+- **TUI を作り直し**（ライブラリ型）:
+  - 起動直後がアプリ一覧。`Enter` で起動、右に実際に使われる設定と由来（global / override）を表示。設定は `e` → `←→` でその場で変更・即保存（18 画面 → 5 タブ + ポップアップ）。
+  - タブ: Library / Proton / Prefixes / Settings / Doctor（`1`–`5`・`Tab`）。上部バーに問題の件数。
+  - `/` でアプリ絞り込み、`:` でコマンドパレット（アプリ名で起動・全操作を検索）、`?` でキー一覧。
+  - 削除（アプリ・prefix・env リセット）は確認ダイアログを表示。
+  - dwproton のインストールを TUI 内で実行し進捗を表示（TUI を抜けない）。`proton::install_dwproton_with` に進捗コールバックを追加。
+  - 通知は種別（成功・警告・エラー）付きで数秒後に消える。文字列マッチによる色分けを廃止。
+  - Add app フォーム: exe はパス入力にも対応、名前と id は自動入力（プレースホルダ表示）、`Ctrl+S` で保存。
+  - `tui.rs`（3,935 行）を `src/tui/` 配下のモジュールに分割。描画ごとのディスク読み込みを廃止。
+- **アプリ個別 Proton**: `apps.toml` の `proton`（未設定は global `config.proton.default` を継承）。TUI Library → **e** → Proton、`add --proton NAME`、Add app フォームの Proton 行。
   - 名前付きインストール（GE や特定の `dwproton-*`）は global `explicit_path` より優先（タイトルごとにビルドを固定できる）。
 - **バイナリ縮小**: release プロファイルに LTO / strip / `opt-level = "s"` / `panic = "abort"` を設定し、HTTP クライアントを `reqwest`（tokio/hyper）から `ureq` に置き換え。9.6 MB → 2.9 MB。
   - `panic = "abort"` でも TUI がパニック時に端末（raw mode / 代替スクリーン）を元に戻すよう panic hook を追加。

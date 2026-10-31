@@ -183,7 +183,71 @@ pub fn resolve_proton_path(
     Err(Error::ProtonNotFound)
 }
 
+/// Install progress sink: the CLI prints and draws indicatif bars, the TUI
+/// forwards events to its own progress gauge.
+pub trait InstallProgress {
+    /// A new phase started (fetching metadata, checksum, extracting…).
+    fn stage(&mut self, msg: &str);
+    /// A download started; `total` is the Content-Length when known.
+    fn download_start(&mut self, name: &str, total: Option<u64>);
+    /// `bytes` more were written for the current download.
+    fn download_advance(&mut self, bytes: u64);
+    fn download_finish(&mut self);
+}
+
+/// CLI progress: `==>` lines plus an indicatif bar per download.
+#[derive(Default)]
+pub struct ConsoleProgress {
+    bar: Option<ProgressBar>,
+}
+
+impl InstallProgress for ConsoleProgress {
+    fn stage(&mut self, msg: &str) {
+        println!("==> {msg}");
+    }
+
+    fn download_start(&mut self, name: &str, total: Option<u64>) {
+        let pb = match total {
+            Some(len) => {
+                let pb = ProgressBar::new(len);
+                pb.set_style(
+                    ProgressStyle::with_template(
+                        "{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+                    )
+                    .unwrap()
+                    .progress_chars("=>-"),
+                );
+                pb
+            }
+            None => ProgressBar::new_spinner(),
+        };
+        pb.set_message(name.to_string());
+        self.bar = Some(pb);
+    }
+
+    fn download_advance(&mut self, bytes: u64) {
+        if let Some(pb) = &self.bar {
+            pb.inc(bytes);
+        }
+    }
+
+    fn download_finish(&mut self) {
+        if let Some(pb) = self.bar.take() {
+            pb.finish_and_clear();
+        }
+    }
+}
+
 pub fn install_dwproton(paths: &Paths, version: Option<&str>, force: bool) -> Result<PathBuf> {
+    install_dwproton_with(paths, version, force, &mut ConsoleProgress::default())
+}
+
+pub fn install_dwproton_with(
+    paths: &Paths,
+    version: Option<&str>,
+    force: bool,
+    progress: &mut dyn InstallProgress,
+) -> Result<PathBuf> {
     paths.ensure_dirs()?;
     let client: ureq::Agent = ureq::Agent::config_builder()
         .user_agent(concat!("protoncli/", env!("CARGO_PKG_VERSION")))
@@ -192,11 +256,11 @@ pub fn install_dwproton(paths: &Paths, version: Option<&str>, force: bool) -> Re
 
     let release: Release = if let Some(tag) = version {
         let url = format!("{DWPROTON_API_TAG}/{tag}");
-        println!("==> Fetching release {tag}");
+        progress.stage(&format!("Fetching release {tag}"));
         fetch_json(&client, &url)
             .map_err(|e| Error::Download(format!("release metadata: {e}")))?
     } else {
-        println!("==> Fetching latest dwproton release");
+        progress.stage("Fetching latest dwproton release");
         fetch_json(&client, DWPROTON_API_LATEST)
             .map_err(|e| Error::Download(format!("latest release: {e}")))?
     };
@@ -208,7 +272,7 @@ pub fn install_dwproton(paths: &Paths, version: Option<&str>, force: bool) -> Re
     let target = paths.runtimes_dir.join(&dir_name);
 
     if target.is_dir() && is_valid_proton_dir(&target) && !force {
-        println!("==> Already installed: {}", target.display());
+        progress.stage(&format!("Already installed: {}", target.display()));
         return Ok(target);
     }
 
@@ -231,8 +295,8 @@ pub fn install_dwproton(paths: &Paths, version: Option<&str>, force: bool) -> Re
             format!("https://dawn.wine/dawn-winery/dwproton/releases/download/{tag}/{sum_name}")
         });
 
-    println!("==> Version:  {tag}");
-    println!("==> Tarball:  {tarball_url}");
+    progress.stage(&format!("Version:  {tag}"));
+    progress.stage(&format!("Tarball:  {tarball_url}"));
 
     let tmp = paths.runtimes_dir.join(format!(".tmp-{dir_name}"));
     if tmp.exists() {
@@ -243,9 +307,10 @@ pub fn install_dwproton(paths: &Paths, version: Option<&str>, force: bool) -> Re
     let tarball_path = tmp.join(&asset_name);
     let sum_path = tmp.join(&sum_name);
 
-    download_file(&client, &sum_url, &sum_path)?;
-    download_file(&client, &tarball_url, &tarball_path)?;
+    download_file(&client, &sum_url, &sum_path, progress)?;
+    download_file(&client, &tarball_url, &tarball_path, progress)?;
 
+    progress.stage("Verifying checksum");
     let expected = parse_sha512sum(&fs::read_to_string(&sum_path)?)?;
     let actual = sha512_file(&tarball_path)?;
     if !expected.eq_ignore_ascii_case(&actual) {
@@ -255,7 +320,8 @@ pub fn install_dwproton(paths: &Paths, version: Option<&str>, force: bool) -> Re
             actual,
         });
     }
-    println!("==> Checksum OK");
+    progress.stage("Checksum OK");
+    progress.stage("Extracting");
 
     // Extract into tmp then rename into place (atomic-ish).
     let extract_root = tmp.join("extract");
@@ -281,7 +347,7 @@ pub fn install_dwproton(paths: &Paths, version: Option<&str>, force: bool) -> Re
         return Err(Error::InvalidProtonPath(target));
     }
 
-    println!("==> Installed: {}", target.display());
+    progress.stage(&format!("Installed: {}", target.display()));
     Ok(target)
 }
 
@@ -293,32 +359,23 @@ fn fetch_json<T: serde::de::DeserializeOwned>(
     client.get(url).call()?.body_mut().read_json()
 }
 
-fn download_file(client: &ureq::Agent, url: &str, dest: &Path) -> Result<()> {
+fn download_file(
+    client: &ureq::Agent,
+    url: &str,
+    dest: &Path,
+    progress: &mut dyn InstallProgress,
+) -> Result<()> {
     let response = client
         .get(url)
         .call()
         .map_err(|e| Error::Download(e.to_string()))?;
 
     let total = response.body().content_length();
-    let pb = if let Some(len) = total {
-        let pb = ProgressBar::new(len);
-        pb.set_style(
-            ProgressStyle::with_template(
-                "{msg} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-            )
-            .unwrap()
-            .progress_chars("=>-"),
-        );
-        pb.set_message(
-            dest.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("download")
-                .to_string(),
-        );
-        pb
-    } else {
-        ProgressBar::new_spinner()
-    };
+    let name = dest
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("download");
+    progress.download_start(name, total);
 
     let mut file = File::create(dest)?;
     // as_reader() はサイズ上限なし（tarball は数百 MB になる）
@@ -333,9 +390,9 @@ fn download_file(client: &ureq::Agent, url: &str, dest: &Path) -> Result<()> {
             break;
         }
         file.write_all(&buf[..n])?;
-        pb.inc(n as u64);
+        progress.download_advance(n as u64);
     }
-    pb.finish_and_clear();
+    progress.download_finish();
     Ok(())
 }
 
